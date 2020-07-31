@@ -24,21 +24,28 @@ from poppy.poppy_core import PlaneType
 # FUNCTION DEFINITIONS
 #########################################
 
-# Function: surfFITS
-# Description: Initiates a FITS file to add to optical system.
-# Input Parameters:
-#   file_loc    - string    - path location of FITS file
-#   optic_type  - string    - Declare if the file is OPD or Transmission type ('opd' or 'trans')
-#   opdunit     - string    - OPD units of FITS file. For some reason, BUNIT header card gives errors.
-#   name        - string    - descriptive name for optic. Useful for phase description.
-# Output Parameters:
-#   optic_surf  - FITSOpticalElement    - Returns FITSOpticalElement to use as surface mapping file.
-# Sequence of Initializing:
-#   - Call in FITS file
-#   - Typecast FITS data to float type (workaround to get POPPY to accept FITS data)
-#   - Determine optic type to choose how to build FITSOpticalElement
-#   - Return FITSOpticalElement object
 def surfFITS(file_loc, optic_type, opdunit, name):
+    '''
+    Initiates a FITS file to add to optical system.
+    Input Parameters:
+        file_loc : string
+            Path location of FITS file
+        optic_type : string
+            Declare if the file is OPD or Transmission type ('opd' or 'trans')
+        opdunit : string
+            OPD units of FITS file. For some reason, BUNIT header card gives errors.
+        name : string
+            Descriptive name for optic. Useful for phase description.
+    Output Parameters:
+        optic_surf : FITSOpticalElement
+            Returns FITSOpticalElement to use as surface mapping file.
+    
+    Sequence of Initializing:
+        - Call in FITS file
+        - Typecast FITS data to float type (workaround to get POPPY to accept FITS data)
+        - Determine optic type to choose how to build FITSOpticalElement
+        - Return FITSOpticalElement object
+    '''
     optic_fits = fits.open(file_loc)
     optic_fits[0].data = np.float_(optic_fits[0].data) # typecasting for POPPY workaround
     if optic_type == 'opd':
@@ -47,15 +54,20 @@ def surfFITS(file_loc, optic_type, opdunit, name):
         optic_surf = poppy.FITSOpticalElement(name = name, transmission=optic_fits)
     return optic_surf
 
-# Function: writeOPDfile
-# Description: Writes OPD mask to FITS file, WILL OVERRIDE OLD FILE IF fileloc IS REUSED
-# Input Parameters:
-#    opd_surf_data   - OPD surface data
-#    pixelscl        - pixel scale on m/pix
-#    fileloc         - file string location for vAPP OPD mask FITS file
-# Output:
-#    none (just does the thing)
+
 def writeOPDfile(opd_surf_data, pixelscl, fileloc):
+    '''
+    Writes OPD mask to FITS file, WILL OVERRIDE OLD FILE IF fileloc IS REUSED
+    Input Parameters:
+        opd_surf_data : float
+            OPD surface data
+        pixelscl : astropy quantity
+            Pixel scale in linear astropy units, should be m/pix
+        fileloc : string
+            File location to save vAPP OPD mask FITS file
+    Output:
+        none (just does the thing)
+    '''
     writeOPD = fits.PrimaryHDU(data=opd_surf_data)
     writeOPD.header.set('PUPLSCAL', pixelscl)
     writeOPD.header.comments['PUPLSCAL'] = 'pixel scale [m/pix]'
@@ -63,45 +75,66 @@ def writeOPDfile(opd_surf_data, pixelscl, fileloc):
     writeOPD.header.comments['BUNIT'] = 'opd units'
     writeOPD.writeto(fileloc, overwrite=True)
 
-# Function: writeTRANSfile
-# Description: Writes transmission mask to FITS file, WILL OVERRIDE OLD FILE IF fileloc IS REUSED
-# Input Parameters:
-#    trans_data      - transmission data
-#    pixelscl        - pixel scale on m/pix
-#    fileloc         - file string location for vAPP transmission mask FITS file
-# Output:
-#    none (just does the thing)
+
 def writeTRANSfile(trans_data, pixelscl, fileloc):
+    '''
+    Writes transmission mask to FITS file, WILL OVERRIDE OLD FILE IF fileloc IS REUSED
+    Input Parameters:
+        trans_data : float
+            Transmission data matrix, usually a pupil
+        pixelscl : astropy quantity
+            Pixel scale in linear astropy units, should be m/pix
+        fileloc : string
+            file location to save vAPP transmission mask FITS file
+    Output:
+        none (just does the thing)
+    '''
     writetrans = fits.PrimaryHDU(data=trans_data)
     writetrans.header.set('PUPLSCAL', pixelscl)
     writetrans.header.comments['PUPLSCAL'] = 'pixel scale [m/pix]'
     writetrans.writeto(fileloc, overwrite=True)
 
 
-# Function: makeRxCSV
-# Desription: Get the system prescription from CSV file
-# FYI: This has some hardcoded numbers in it, but just follow the specs on the CSV file.
-# Input parameters:
-#    csv_file   - CSV file location
-# Output parameters:
-#    sys_rx     - system prescription into a workable array format
 def makeRxCSV(csv_file):
+    '''
+    Get the system prescription from CSV file
+    FYI: This has some hardcoded numbers in it, but just follow the specs on the CSV file.
+    Input parameters:
+        csv_file : string
+            CSV file location to open
+    Output parameters:
+        sys_rx : numpy array? I forget
+            System prescription into a workable array format
+    '''
     sys_rx=np.genfromtxt(csv_file, delimiter=',', dtype="i2,U19,U10,f8,f8,f8,U90,U90,U10,U10,f8,U10,", skip_header=15,names=True)
     print('CSV file name: %s' % csv_file)
     print('The names of the headers are:')
     print(sys_rx.dtype.names)
     return sys_rx
 
-# Function: csvFresnel
-# Description: Builds FresnelOpticalSystem from a prescription CSV file passed in
-# Input parameters:
-#    rx_csv      - system prescription
-#    res         - resolution
-#    oversamp    - oversampling convention used in PROPER
-#    break_plane - plane to break building the MagAO-X prescription
-# Output:
-#    sys_build   - FresnelOpticalSystem object with all optics built into it
-def csvFresnel(rx_csv, samp, oversamp, break_plane):
+
+def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
+    '''
+    Builds FresnelOpticalSystem from a prescription CSV file passed in and using PSD WFE class.
+    Input parameters:
+        rx_csv : probably numpy array?
+            Optical system prescription built from csv file
+        samp : index
+            Number of pixels resolution before zero padding
+        oversamp : float
+            Oversampling convention used in PROPER for how big to zero pad
+        break_plane : string
+            Plane to break building the MagAO-X prescription
+        psd_dict : dictionary
+            Contains the PSD parameters listed in dictionary format for various optics
+            Not necessary if using file uploads exclusively.
+        seed : iterable of intergers
+            Seed for the random phase screen generator used in PSD surface building.
+            Not necessary if using 
+    Output:
+        sys_build : poppy.FresnelOpticalSystem object 
+            Complete optical system built with propagation, prescriptions included
+    '''
     M1_radius=rx_csv['Radius_m'][1]*u.m # Element [1] is M1 because Element [0] is the pupil mask
     
     sys_build = poppy.FresnelOpticalSystem(pupil_diameter=2*M1_radius, npix=samp, beam_ratio=oversamp)
@@ -109,34 +142,43 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane):
     # Entrance Aperture
     sys_build.add_optic(poppy.CircularAperture(radius=M1_radius))
 
-    # Build MagAO-X optical system from CSV file to the Lyot plane
+    # Build MagAO-X optical system from CSV file
     for n_optic,optic in enumerate(rx_csv): # n_optic: count, optic: value
 
         dz = optic['Distance_m'] * u.m # Propagation distance from the previous optic (n_optic-1)
         fl = optic['Focal_Length_m'] * u.m # Focal length of the current optic (n_optic)
 
-        #print('Check PSD file for %s: %s' % (optic['Name'], optic['surf_PSD']))
-        # if PSD file present
-        if optic['surf_PSD_filename'] != 'none':
-            # make a string insertion for the file location
-            surf_file_loc = optic['surf_PSD_folder'] + optic['surf_PSD_filename'] + '.fits'
-            # call surfFITS to send out surface map
-            optic_surface = surfFITS(file_loc = surf_file_loc, optic_type = optic['optic_type'], opdunit = optic['OPD_unit'], name = optic['Name']+' surface')
+        # call in surface name to see if it needs to do PSD
+        surf_filename = optic['surf_PSD_filename']
+        
+        if surf_filename != 'none': # if PSD file present
+            if surf_filename[0:3] == 'psd': # check if surface needs to be built using PSD parameters
+                psd_parm = psd_dict[surf_filename]
+                psd_weight = psd_dict[surf_filename+'_weight']
+                if seed != 'none':
+                    psd_seed = seed[n_optic]
+                else:
+                    psd_seed = 'none'
+                optic_surface = poppy.wfe.ModelPSDWFE(name = optic['Name']+' PSD WFE', 
+                                                      psd_parameters=psd_parm, psd_weight=psd_weight, seed=psd_seed)
+            else: # need to open surface file
+                surf_file_loc = optic['surf_PSD_folder'] + optic['surf_PSD_filename'] + '.fits'
+                # call surfFITS to send out surface map
+                optic_surface = surfFITS(file_loc = surf_file_loc, optic_type = optic['optic_type'], 
+                                         opdunit = optic['OPD_unit'], name = optic['Name']+' surface')
+            
             # Add generated surface map to optical system
             sys_build.add_optic(optic_surface,distance=dz)
-
-            if fl != 0: # powered optic with PSD file present
+            
+            if fl != 0: # powered optic with surface present
                 sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name'])) 
                 # no distance; surface comes first
                 sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-
-            elif optic['Type'] != 'pupil': # non-powered optic but has PSD present that is NOT the pupil
+            elif optic['Type'] != 'pupil': # non-powered optic but has surface present that is NOT the pupil
                 sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
 
-        # if no PSD file present (DM, focal plane, testing optical surface)
-        else:
-            # if powered optic is being tested
-            if fl !=0: 
+        else: # if no surface file present (DM, focal plane, testing optical surface)
+            if fl !=0: # if powered optic is being tested
                 sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name']), distance=dz)
                 sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
             
@@ -155,136 +197,52 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane):
         
     return sys_build
 
-# Function: csvFresnel
-# Description: Builds FresnelOpticalSystem from a prescription CSV file passed in
-# Input parameters:
-#    rx_csv      - system prescription
-#    res         - resolution
-#    oversamp    - oversampling convention used in PROPER
-#    break_plane - plane to break building the MagAO-X prescription
-# Output:
-#    sys_build   - FresnelOpticalSystem object with all optics built into it
-def csvFresnel2(rx_csv, samp, oversamp, break_plane, system_build = None):
+
+def calcFraunhofer(fresnel_parms, pupil_file, vapp_pos_file, vapp_neg_file, vapp_trans_file):
+    pupil_scale = fits.open(pupil_file)[0].header['PUPLSCAL']
+    pupil = surfFITS(file_loc=pupil_file, optic_type='trans', opd_unit='none',
+                     name='MagAO-X Pupil (unmasked)')
     
-    if system_build == None:
-        M1_radius=rx_csv['Radius_m'][1]*u.m # Element [1] is M1 because Element [0] is the pupil mask
+    for ip in range(0, 3):
+        mfar = poppy.OpticalSystem("Fraunhofer", oversample=np.int(1/fresnel_parms['beam_ratio']))
+        mfar.add_pupil(optic=pupil)
+        mfar.add_image(name='f11 fp')
+        mfar.add_pupil(name='woofer DM')
+        mfar.add_image(name='f16 fp')
+        mfar.add_pupil(name='tweeter DM')
+        mfar.add_image(name='f57 fp')
+        # choose the vAPP setting
+        if ip==0: # leakage term
+            mfar.add_pupil(name='vAPP (none)')
+        elif ip==1: # positive phase
+            mfar.add_pupil(poppy.FITSOpticalElement(transmission=vapp_trans_file,
+                                                    opd=vapp_pos_file,
+                                                    pixelscale=pupil_scale))
+        elif ip==2: # negative phase
+            mfar.add_pupil(poppy.FITSOpticalElement(transmission=vapp_trans_file,
+                                                    opd=vapp_neg_file,
+                                                    pixelscale=pupil_scale))
+        mfar.add_image(name='f69 fp')
+        mfar.add_pupil(name='Lyot')
+        mfar.add_image(name='f69 fp sci')
         
-        sys_build = poppy.FresnelOpticalSystem(pupil_diameter=2*M1_radius, npix=samp, beam_ratio=oversamp)
-
-        # Entrance Aperture
-        sys_build.add_optic(poppy.CircularAperture(radius=M1_radius))
-    else:
-        sys_build = system_build
-
-    # Build MagAO-X optical system from CSV file to the Lyot plane
-    for n_optic,optic in enumerate(rx_csv): # n_optic: count, optic: value
-
-        dz = optic['Distance_m'] * u.m # Propagation distance from the previous optic (n_optic-1)
-        fl = optic['Focal_Length_m'] * u.m # Focal length of the current optic (n_optic)
-
-        #print('Check PSD file for %s: %s' % (optic['Name'], optic['surf_PSD']))
-        # if PSD file present
-        if optic['surf_PSD_filename'] != 'none':
-            # make a string insertion for the file location
-            surf_file_loc = optic['surf_PSD_folder'] + optic['surf_PSD_filename'] + '.fits'
-            # call surfFITS to send out surface map
-            optic_surface = surfFITS(file_loc = surf_file_loc, optic_type = optic['optic_type'], opdunit = optic['OPD_unit'], name = optic['Name']+' surface')
-            # Add generated surface map to optical system
-            sys_build.add_optic(optic_surface,distance=dz)
-
-            if fl != 0: # powered optic with PSD file present
-                sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name'])) 
-                # no distance; surface comes first
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-
-            elif optic['Type'] != 'pupil': # non-powered optic but has PSD present that is NOT the pupil
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-
-        # if no PSD file present (DM, focal plane, testing optical surface)
-        else:
-            # if powered optic is being tested
-            if fl !=0: 
-                sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name']), distance=dz)
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-            
-            # for DM, flat mirrors
-            elif optic['Type'] == 'mirror' or optic['Type'] == 'DM':
-                sys_build.add_optic(poppy.ScalarTransmission(planetype=PlaneType.intermediate, name=optic['Name']),distance=dz)
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-
-            else: # for focal plane, science plane, lyot plane
-                sys_build.add_optic(poppy.ScalarTransmission(planetype=PlaneType.intermediate, name=optic['Name']),distance=dz)
-
-        # if the most recent optic studied was the break plane, break out of loop.
-        if optic['Name'] == break_plane: 
-            #print('Finish building FresnelOpticalSystem at %s' % break_plane)
-            break
-        
-    return sys_build
-
-
-# Function: csvFresnel
-# Description: Builds FresnelOpticalSystem from a prescription CSV file passed in
-# Input parameters:
-#    rx_csv      - system prescription
-#    res         - resolution
-#    oversamp    - oversampling convention used in PROPER
-#    break_plane - plane to break building the MagAO-X prescription
-# Output:
-#    sys_build   - FresnelOpticalSystem object with all optics built into it
-def csvFresnel_redo(rx_csv, samp, oversamp, break_plane, surface_mode=True):
-    M1_radius=rx_csv['Radius_m'][1]*u.m # Element [1] is M1 because Element [0] is the pupil mask
+        # calculate the PSFs
+        if ip==0: # leakage PSF
+            print('Calculating Leakage PSF')
+            leak_psf_far = mfar.calc_psf(wavelength=fresnel_parms['wavelength'].value)[0]
+        elif ip==1: # positive phase PSF (bottom PSF)
+            print('Calculating +phase PSF')
+            pos_psf_far = mfar.calc_psf(wavelength=fresnel_parms['wavelength'].value)[0]
+        elif ip==2: # negative phase PSF (top PSF)
+            print('Calculating -phase PSF\n')
+            neg_psf_far = mfar.calc_psf(wavelength=fresnel_parms['wavelength'].value)[0]
     
-    sys_build = poppy.FresnelOpticalSystem(pupil_diameter=2*M1_radius, npix=samp, beam_ratio=oversamp)
+    # sum the PSF intensities
+    tot_psf_far = pos_psf_far.data + neg_psf_far.data + (leak_psf_far.data*fresnel_parms['leak_mult'])
+    
+    return tot_psf_far
 
-    # Entrance Aperture
-    sys_build.add_optic(poppy.CircularAperture(radius=M1_radius))
 
-    # Build MagAO-X optical system from CSV file to the Lyot plane
-    for n_optic,optic in enumerate(rx_csv): # n_optic: count, optic: value
-
-        dz = optic['Distance_m'] * u.m # Propagation distance from the previous optic (n_optic-1)
-        fl = optic['Focal_Length_m'] * u.m # Focal length of the current optic (n_optic)
-
-        #print('Check PSD file for %s: %s' % (optic['Name'], optic['surf_PSD']))
-        # if PSD file present
-        if optic['surf_PSD_filename'] != 'none':
-            # make a string insertion for the file location
-            surf_file_loc = optic['surf_PSD_folder'] + optic['surf_PSD_filename'] + '.fits'
-            # call surfFITS to send out surface map
-            optic_surface = surfFITS(file_loc = surf_file_loc, optic_type = optic['optic_type'], opdunit = optic['OPD_unit'], name = optic['Name']+' surface')
-            # Add generated surface map to optical system
-            sys_build.add_optic(optic_surface,distance=dz)
-
-            if fl != 0: # powered optic with PSD file present
-                sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name'])) 
-                # no distance; surface comes first
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-
-            elif optic['Type'] != 'pupil': # non-powered optic but has PSD present that is NOT the pupil
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-
-        # if no PSD file present (DM, focal plane, testing optical surface)
-        else:
-            # if powered optic is being tested
-            if fl !=0: 
-                sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name']), distance=dz)
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-            
-            # for DM, flat mirrors
-            elif optic['Type'] == 'mirror' or optic['Type'] == 'DM':
-                sys_build.add_optic(poppy.ScalarTransmission(planetype=PlaneType.intermediate, name=optic['Name']),distance=dz)
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-
-            else: # for focal plane, science plane, lyot plane
-                sys_build.add_optic(poppy.ScalarTransmission(planetype=PlaneType.intermediate, name=optic['Name']),distance=dz)
-
-        # if the most recent optic studied was the break plane, break out of loop.
-        if optic['Name'] == break_plane: 
-            #print('Finish building FresnelOpticalSystem at %s' % break_plane)
-            break
-        
-    return sys_build
 
 # Function: CropMaskLyot
 # Description: Crops the Lyot phase
@@ -360,7 +318,7 @@ def centerCropLyotMask(lyot_data, pupil_mask, fresnel_parms, vshift=0, hshift=0)
 # Function: make_DHmask
 # NOTE: ONLY WORKS when samp_size = 256, which is the default setting
 # ALSO NOTE: I'm using hard coded numbers optimized for samp_size=256
-def make_DHmask(samp_size):
+def make_DHmask_256(samp_size):
     circ_pattern = np.zeros((samp_size, samp_size), dtype=np.uint8)
     circ_coords = draw.circle(samp_size/2, samp_size/2, radius=80)
     circ_pattern[circ_coords] = True

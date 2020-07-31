@@ -149,6 +149,8 @@ class surfPSD:
         # zero pad to oversample then start taking FT's
         pad_side = int((self.oversamp - self.mask.shape[0])/2)
         optic_ovs = np.pad(hannWin, pad_side, pad_with)
+        if optic_ovs.shape[0] != self.oversamp: # I hope this doesn't break things
+            self.oversamp = optic_ovs.shape[0]
         FT_wf = np.fft.fftshift(np.fft.fft2(optic_ovs))*self.data.unit # this comes out unitless, reapply
         self.psd_raw = np.real(FT_wf*np.conjugate(FT_wf))#/(self.data.unit**2)
         # psd_raw should be in units of [data]**2
@@ -195,7 +197,10 @@ class surfPSD:
         # generic version of code if inputting a different ring width and PSD data set
         # make grid for average radial power value
         shift = np.int(self.oversamp/2)
-        maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
+        if self.oversamp%2 != 0:
+            maskY, maskX = np.ogrid[-shift:shift+1, -shift:shift+1]
+        else:
+            maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
         
         # set up ring parameters
         if ring_width % 2 == 0:
@@ -253,7 +258,10 @@ class surfPSD:
         
         # make a grid for the average radial power value
         shift = np.int(self.oversamp/2)
-        maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
+        if self.oversamp %2 != 0:
+            maskY, maskX = np.ogrid[-shift:shift+1, -shift:shift+1]
+        else:
+            maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
         
         # make the mask
         radial_mask = makeRingMask(maskY, maskX, bin_low, ring_width)
@@ -438,7 +446,9 @@ def model_full(k, psd_parm):
 
 ###########################################
 # BUILD SURFACE
-
+'''
+NOTE: This section is getting imported to POPPY eventually. Kept here for test coding.
+'''
 class surfgen:
     def __init__(self, dx, npix_diam, oversamp):
         self.dx = dx # phase space resolution [m/pix]
