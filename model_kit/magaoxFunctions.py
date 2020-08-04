@@ -15,6 +15,7 @@ from astropy.io import fits
 from  matplotlib.colors import LogNorm
 import scipy.ndimage
 from skimage.draw import draw # drawing tools for dark hole mask
+import copy
 #POPPY
 import poppy
 from poppy.poppy_core import PlaneType
@@ -199,13 +200,13 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
     return sys_build
 
 
-def calcFraunhofer(fr_parm, pupil_file, vapp_folder):
+def calcFraunhofer_mwfs(fr_parm, pupil_file, vapp_folder, write_file=False):
     '''
     Calculate the Fraunhofer propagation for MagAO-X using MWFS vAPP
     This is good to use for very quick calculation to find specific locations.
     '''
     pupil_scale = fits.open(pupil_file)[0].header['PUPLSCAL']
-    pupil = surfFITS(file_loc=pupil_file, optic_type='trans', opd_unit='none',
+    pupil = surfFITS(file_loc=pupil_file, optic_type='trans', opdunit='none',
                      name='MagAO-X Pupil (unmasked)')
     
     wavelen = np.round(fr_parm['wavelength'].to(u.nm).value).astype(int)
@@ -253,7 +254,26 @@ def calcFraunhofer(fr_parm, pupil_file, vapp_folder):
     # sum the PSF intensities
     tot_psf_far = pos_psf_far.data + neg_psf_far.data + (leak_psf_far.data*fr_parm['leak_mult'])
     
-    return tot_psf_far
+    # box it
+    half_side = int(fr_parm['npix']/2)
+    cen = int(tot_psf_far.shape[0]/2)
+    box_psf = tot_psf_far[cen-half_side:cen+half_side, cen-half_side:cen+half_side]
+    
+    # set contrast
+    box_psf = box_psf / np.amax(box_psf)
+    
+    # write the file
+    if write_file == True:
+        # Write the file (not mandatory)
+        hdr_far = copy.copy(pos_psf_far.header)
+        del hdr_far['HISTORY']
+        hdr_far.set('PIX_SAMP', fr_parm['npix'], 'initial pixel sampling size')
+        hdr_far.set('LEAKMULT', fr_parm['leak_mult'], 'Multiplier for leakage term intensity')
+        hdr_far.set('DIFFMODE', 'Fraunhofer', 'Diffraction Propagation mode')
+        fits_loc = 'Magaox_2psf_mwfs_constrast_Fraunhofer_{0}.fits'.format(parm_name)
+        fits.PrimaryHDU(box_psf, header=hdr_far).writeto(fits_loc, overwrite=True)
+    
+    return box_psf
 
 
 def build_vapp_mwfs(fr_parm):
@@ -303,7 +323,69 @@ def build_vapp_mwfs(fr_parm):
     # Calculate the negative phase OPD and write the file
     vapp_2psf_opd_negPhase = -1*vapp_2psf_opd_posPhase
     writeOPDfile(vapp_2psf_opd_negPhase, vAPP_pixelscl, vAPP_folder + vAPP_negOPD_filename + '.fits')
+    
+    
+def build_mwfs_masks(mask_dict, write_masks=False):
+    # generate bottom PSF circle
+    circ_bot = np.zeros((mask_dict['mask_size'],mask_dict['mask_size']),
+                        dtype=np.uint8)
+    cb_coords = draw.circle(r = mask_dict['cbot_cen'][0], c = mask_dict['cbot_cen'][0], 
+                            radius=mask_dict['c_radius'], shape=circ_bot.shape)
+    circ_bot[cb_coords] = True
+    
+    # generate top PSF circle
+    circ_top = np.zeros_like(circ_bot)
+    ct_coords = draw.circle(r = mask_dict['ctop_cen'][0], c = mask_dict['ctop_cen'][0], 
+                            radius=mask_dict['c_radius'], shape=circ_top.shape)
+    circ_top[ct_coords] = True
 
+    # generate bottom mask rectangle
+    rect_bot = np.zeros_like(circ_bot)
+    rr,cc = draw.rectangle(start=mask_dict['rect_corner'], extent=mask_dict['rect_side'], 
+                        shape=rect_bot.shape)
+    rect_bot[rr,cc] = 1
+    rect_bot_rot = scipy.ndimage.rotate(input=rect_bot, angle=mask_dict['rect_angle'], 
+                                        reshape=False)
+    rect_bot_rot = np.roll(rect_bot_rot, shift=mask_dict['rect_shift_top'][1], axis=1)
+    rect_bot_rot = np.roll(rect_bot_rot, shift=mask_dict['rect_shift_top'][0], axis=0)
+    
+    # combine bottom PSF circle with bottom rectangle to get bottom mask
+    mask_bot = circ_bot * rect_bot_rot
+
+    # top mask is 180 deg flip of bottom mask
+    mask_top = scipy.ndimage.rotate(mask_bot, 180, reshape=False)
+    mask_top = np.roll(mask_top, shift=mask_dict['rect_shift_bot'][1], axis=1) # axis 1 is horizontal
+    mask_top = np.roll(mask_top, shift=mask_dict['rect_shift_bot'][0], axis=0) # axis 0 is vertical
+    
+    # check if need to write the masks (not mandatory)
+    if write_masks == True:
+        # Write the common header file
+        hdr_data = fits.PrimaryHDU().header
+        hdr_data.set('NPIX', mask_dict['npix'], 'initial pixel sampling size')
+        hdr_data.set('OVERSAMP', 1/mask_dict['beam_ratio'], 'oversample value taken for FT')
+        hdr_data.set('WAVELEN', mask_dict['wavelength'].value, 'wavelength used [m]')
+        parm_name = set_fresnel_parm_string(dict_def=mask_dict)
+        fits_loc = 'mwfs_mask_{0}_'.format(parm_name)
+        # write the files
+        fits.PrimaryHDU(circ_top, header=hdr_data).writeto(fits_loc+'top_psf.fits', overwrite=True)
+        fits.PrimaryHDU(circ_bot, header=hdr_data).writeto(fits_loc+'bot_psf.fits', overwrite=True)
+        fits.PrimaryHDU(mask_top, header=hdr_data).writeto(fits_loc+'top_mask.fits', overwrite=True)
+        fits.PrimaryHDU(mask_bot, header=hdr_data).writeto(fits_loc+'bot_mask.fits', overwrite=True)
+    
+    return circ_top, circ_bot, mask_top, mask_bot
+
+
+def calc_mwfs_dh(mwfs_psf, psf_mask, dh_mask):
+    psf_peak = np.amax(mwfs_psf[psf_mask==True]) # calculate relative peak
+    dh_cont = np.mean(mwfs_psf[dh_mask==True]/psf_peak) # calculate average contrast in dh
+    return dh_cont
+
+
+def set_fresnel_parm_string(dict_def):
+    wavelen = np.round(dict_def['wavelength'].to(u.nm).value).astype(int)
+    br = int(1/dict_def['beam_ratio'])
+    parm_name = '{0:3}_{1:1}x_{2:3}nm'.format(dict_def['npix'], br, wavelen)
+    return parm_name
 
 # Function: CropMaskLyot
 # Description: Crops the Lyot phase
