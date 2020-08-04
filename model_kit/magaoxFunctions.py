@@ -95,7 +95,7 @@ def writeTRANSfile(trans_data, pixelscl, fileloc):
     writetrans.writeto(fileloc, overwrite=True)
 
 
-def makeRxCSV(csv_file):
+def makeRxCSV(csv_file, print_names=False):
     '''
     Get the system prescription from CSV file
     FYI: This has some hardcoded numbers in it, but just follow the specs on the CSV file.
@@ -107,9 +107,10 @@ def makeRxCSV(csv_file):
             System prescription into a workable array format
     '''
     sys_rx=np.genfromtxt(csv_file, delimiter=',', dtype="i2,U19,U10,f8,f8,f8,U90,U90,U10,U10,f8,U10,", skip_header=15,names=True)
-    print('CSV file name: %s' % csv_file)
-    print('The names of the headers are:')
-    print(sys_rx.dtype.names)
+    if print_names==True:
+        print('CSV file name: %s' % csv_file)
+        print('The names of the headers are:')
+        print(sys_rx.dtype.names)
     return sys_rx
 
 
@@ -155,10 +156,10 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
             if surf_filename[0:3] == 'psd': # check if surface needs to be built using PSD parameters
                 psd_parm = psd_dict[surf_filename]
                 psd_weight = psd_dict[surf_filename+'_weight']
-                if seed != 'none':
+                if seed != None:
                     psd_seed = seed[n_optic]
                 else:
-                    psd_seed = 'none'
+                    psd_seed = None
                 optic_surface = poppy.wfe.ModelPSDWFE(name = optic['Name']+' PSD WFE', 
                                                       psd_parameters=psd_parm, psd_weight=psd_weight, seed=psd_seed)
             else: # need to open surface file
@@ -170,11 +171,11 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
             # Add generated surface map to optical system
             sys_build.add_optic(optic_surface,distance=dz)
             
-            if fl != 0: # powered optic with surface present
+            if fl != 0: # apply power if powered optic
                 sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name'])) 
                 # no distance; surface comes first
-                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
-            elif optic['Type'] != 'pupil': # non-powered optic but has surface present that is NOT the pupil
+                #sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture")) 
+            if optic['Type'] not in ['pupil', 'vapp'] : # non-powered optic n
                 sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
 
         else: # if no surface file present (DM, focal plane, testing optical surface)
@@ -183,7 +184,7 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
                 sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
             
             # for DM, flat mirrors
-            elif optic['Type'] == 'mirror' or optic['Type'] == 'DM':
+            elif optic['Type'] in ['mirror', 'DM']:
                 sys_build.add_optic(poppy.ScalarTransmission(planetype=PlaneType.intermediate, name=optic['Name']),distance=dz)
                 sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
 
@@ -198,13 +199,25 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
     return sys_build
 
 
-def calcFraunhofer(fresnel_parms, pupil_file, vapp_pos_file, vapp_neg_file, vapp_trans_file):
+def calcFraunhofer(fr_parm, pupil_file, vapp_folder):
+    '''
+    Calculate the Fraunhofer propagation for MagAO-X using MWFS vAPP
+    This is good to use for very quick calculation to find specific locations.
+    '''
     pupil_scale = fits.open(pupil_file)[0].header['PUPLSCAL']
     pupil = surfFITS(file_loc=pupil_file, optic_type='trans', opd_unit='none',
                      name='MagAO-X Pupil (unmasked)')
     
+    wavelen = np.round(fr_parm['wavelength'].to(u.nm).value).astype(int)
+    br = int(1/fr_parm['beam_ratio'])
+    parm_name = '{0:3}_{1:1}x_{2:3}nm'.format(fr_parm['npix'], br, wavelen)
+    
+    vapp_pos_file = vapp_folder + 'vAPP_opd_2PSF_{0}_posPhase.fits'.format(parm_name)
+    vapp_neg_file = vapp_folder + 'vAPP_opd_2PSF_{0}_negPhase.fits'.format(parm_name)
+    vapp_trans_file = vapp_folder + 'vAPP_trans_2PSF_{0}.fits'.format(parm_name)
+
     for ip in range(0, 3):
-        mfar = poppy.OpticalSystem("Fraunhofer", oversample=np.int(1/fresnel_parms['beam_ratio']))
+        mfar = poppy.OpticalSystem("Fraunhofer", oversample=br)
         mfar.add_pupil(optic=pupil)
         mfar.add_image(name='f11 fp')
         mfar.add_pupil(name='woofer DM')
@@ -229,19 +242,67 @@ def calcFraunhofer(fresnel_parms, pupil_file, vapp_pos_file, vapp_neg_file, vapp
         # calculate the PSFs
         if ip==0: # leakage PSF
             print('Calculating Leakage PSF')
-            leak_psf_far = mfar.calc_psf(wavelength=fresnel_parms['wavelength'].value)[0]
+            leak_psf_far = mfar.calc_psf(wavelength=fr_parm['wavelength'].value)[0]
         elif ip==1: # positive phase PSF (bottom PSF)
             print('Calculating +phase PSF')
-            pos_psf_far = mfar.calc_psf(wavelength=fresnel_parms['wavelength'].value)[0]
+            pos_psf_far = mfar.calc_psf(wavelength=fr_parm['wavelength'].value)[0]
         elif ip==2: # negative phase PSF (top PSF)
             print('Calculating -phase PSF\n')
-            neg_psf_far = mfar.calc_psf(wavelength=fresnel_parms['wavelength'].value)[0]
+            neg_psf_far = mfar.calc_psf(wavelength=fr_parm['wavelength'].value)[0]
     
     # sum the PSF intensities
-    tot_psf_far = pos_psf_far.data + neg_psf_far.data + (leak_psf_far.data*fresnel_parms['leak_mult'])
+    tot_psf_far = pos_psf_far.data + neg_psf_far.data + (leak_psf_far.data*fr_parm['leak_mult'])
     
     return tot_psf_far
 
+
+def build_vapp_mwfs(fr_parm):
+    '''
+    Build the vAPP MWFS files for OPD and transmission given the fr_parm dictionary
+    fr_parm must include:
+        wavelength : astropy quantity
+            Wavelength to be used for Fresnel propagation, units m
+        npix : int
+            Number of sampling pixels to be used in Fresnel propagation
+        beam_ratio : float
+            Similar to oversamp
+    '''
+    wavelen = np.round(fr_parm['wavelength'].to(u.nm).value).astype(int)
+    br = int(1/fr_parm['beam_ratio'])
+    parm_name = '{0:3}_{1:1}x_{2:3}nm'.format(fr_parm['npix'], br, wavelen)
+
+    # load the CSV prescription values
+    home_dir = '/home/jhen/XWCL/code/MagAOX/' # change for exao0
+    data_dir = home_dir + 'data/'
+    rx_loc = 'rxCSV/rx_magaox_NCPDM_sci_{0}.csv'.format(parm_name)
+    rx_sys = mf.makeRxCSV(data_dir+rx_loc)
+
+    # acquiring csv numerical values for specifically named optics
+    for t_optic, test_opt in enumerate(rx_sys):
+        if test_opt['Name'] == 'vAPP-trans':
+            vapp_diam = test_opt['Radius_m']*2*u.m
+
+    # vAPP file information
+    vAPP_pixelscl = vapp_diam.value/fr_parm['npix'] # direct from csv data file
+    vAPP_folder = data_dir+'coronagraph/'
+    vAPP_trans_filename = 'vAPP_trans_2PSF_{0}'.format(parm_name)
+    vAPP_posOPD_filename = 'vAPP_opd_2PSF_{0}_posPhase'.format(parm_name)
+    vAPP_negOPD_filename = 'vAPP_opd_2PSF_{0}_negPhase'.format(parm_name)
+
+    # Call in vAPP data
+    vapp_phase_grating_data = fits.open(vAPP_folder+'MagAOX_vAPP_512x512.fits')[0].data
+    vapp_aperture_data = fits.open(vAPP_folder+'MagAOX_pupil_512x512.fits')[0].data
+
+    # Calculate the transmissive mask
+    writeOPDfile(vapp_aperture_data, vAPP_pixelscl, vAPP_folder + vAPP_trans_filename + '.fits')
+
+    # Calculate the positive phase OPD and write the file
+    vapp_2psf_opd_posPhase = 1*(fr_parm['wavelength'].value/(2*np.pi))*vapp_phase_grating_data*vapp_aperture_data
+    writeOPDfile(vapp_2psf_opd_posPhase, vAPP_pixelscl, vAPP_folder + vAPP_posOPD_filename + '.fits')
+
+    # Calculate the negative phase OPD and write the file
+    vapp_2psf_opd_negPhase = -1*vapp_2psf_opd_posPhase
+    writeOPDfile(vapp_2psf_opd_negPhase, vAPP_pixelscl, vAPP_folder + vAPP_negOPD_filename + '.fits')
 
 
 # Function: CropMaskLyot

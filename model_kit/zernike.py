@@ -177,6 +177,17 @@ def remove_ptt(data, mask, wave_num):
     return (rem_ptt, w_ptt)
 
 
+def add_zernike(data, mask, wave_num, z_weights):
+    '''
+    Didn't expect to do this, but here we are
+    '''
+    for ji in range(0, z_weights.shape[0]):
+        zernike_surf = z_weights[ji] * calc_zernike_phase(j_index=ji+1, aperture=mask) * wave_num
+        data = data + zernike_surf
+        
+    return data
+    
+
 def raw_to_surf(data_dict, write_raw=False, write_surf=False):
     tot_fm = data_dict['n_fm']
     tot_step = data_dict['n_step']
