@@ -259,9 +259,6 @@ def calcFraunhofer_mwfs(fr_parm, pupil_file, vapp_folder, write_file=False):
     cen = int(tot_psf_far.shape[0]/2)
     box_psf = tot_psf_far[cen-half_side:cen+half_side, cen-half_side:cen+half_side]
     
-    # set contrast
-    box_psf = box_psf / np.amax(box_psf)
-    
     # write the file
     if write_file == True:
         # Write the file (not mandatory)
@@ -287,23 +284,28 @@ def build_vapp_mwfs(fr_parm):
         beam_ratio : float
             Similar to oversamp
     '''
-    wavelen = np.round(fr_parm['wavelength'].to(u.nm).value).astype(int)
-    br = int(1/fr_parm['beam_ratio'])
-    parm_name = '{0:3}_{1:1}x_{2:3}nm'.format(fr_parm['npix'], br, wavelen)
-
+    parm_name = set_fresnel_parm_string(dict_def=fr_parm)
+    
     # load the CSV prescription values
     home_dir = '/home/jhen/XWCL/code/MagAOX/' # change for exao0
     data_dir = home_dir + 'data/'
     rx_loc = 'rxCSV/rx_magaox_NCPDM_sci_{0}.csv'.format(parm_name)
-    rx_sys = mf.makeRxCSV(data_dir+rx_loc)
-
-    # acquiring csv numerical values for specifically named optics
+    rx_sys = makeRxCSV(data_dir+rx_loc)
+    
+    # zero out all surfaces for system
     for t_optic, test_opt in enumerate(rx_sys):
-        if test_opt['Name'] == 'vAPP-trans':
-            vapp_diam = test_opt['Radius_m']*2*u.m
+        if fr_parm['surf_off'] == True: #and test_opt['Optical_Element_Number'] > 1:
+            test_opt['surf_PSD_filename'] = 'none'
+    # overwrite to keep the pupil mask
+    rx_sys[0]['surf_PSD_folder'] = data_dir
+    rx_sys[0]['surf_PSD_filename'] = 'MagAOX_f11_pupil_{0}_unmasked'.format(fr_parm['npix'])
 
-    # vAPP file information
-    vAPP_pixelscl = vapp_diam.value/fr_parm['npix'] # direct from csv data file
+    # propagate all the way to the vAPP plane
+    magaox = csvFresnel(rx_sys, fr_parm['npix'], fr_parm['beam_ratio'], 'vAPP-trans')
+    pp_psf = magaox.calc_psf(wavelength=fr_parm['wavelength'].value)[0]
+    
+    # collect the pixelscale
+    vAPP_pixelscl = pp_psf.header['PIXELSCL']
     vAPP_folder = data_dir+'coronagraph/'
     vAPP_trans_filename = 'vAPP_trans_2PSF_{0}'.format(parm_name)
     vAPP_posOPD_filename = 'vAPP_opd_2PSF_{0}_posPhase'.format(parm_name)
@@ -314,18 +316,19 @@ def build_vapp_mwfs(fr_parm):
     vapp_aperture_data = fits.open(vAPP_folder+'MagAOX_pupil_512x512.fits')[0].data
 
     # Calculate the transmissive mask
-    writeOPDfile(vapp_aperture_data, vAPP_pixelscl, vAPP_folder + vAPP_trans_filename + '.fits')
+    writeTRANSfile(vapp_aperture_data, vAPP_pixelscl, vAPP_folder + vAPP_trans_filename + '.fits')
 
     # Calculate the positive phase OPD and write the file
     vapp_2psf_opd_posPhase = 1*(fr_parm['wavelength'].value/(2*np.pi))*vapp_phase_grating_data*vapp_aperture_data
     writeOPDfile(vapp_2psf_opd_posPhase, vAPP_pixelscl, vAPP_folder + vAPP_posOPD_filename + '.fits')
 
     # Calculate the negative phase OPD and write the file
-    vapp_2psf_opd_negPhase = -1*vapp_2psf_opd_posPhase
+    vapp_2psf_opd_negPhase = -1*(fr_parm['wavelength'].value/(2*np.pi))*vapp_phase_grating_data*vapp_aperture_data
     writeOPDfile(vapp_2psf_opd_negPhase, vAPP_pixelscl, vAPP_folder + vAPP_negOPD_filename + '.fits')
-    
+
     
 def build_mwfs_masks(mask_dict, write_masks=False):
+    # this was built using the Fraunhofer calculation of the vAPP
     # generate bottom PSF circle
     circ_bot = np.zeros((mask_dict['mask_size'],mask_dict['mask_size']),
                         dtype=np.uint8)
