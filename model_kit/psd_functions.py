@@ -353,13 +353,14 @@ class model:
         # Expand spatial freq range to see where the model takes us with the data
         N = np.ceil(k_limit / delta_k) # find how many values required to meet limit
         self.k_extend = np.arange(start=1, stop=N)*delta_k
+        self.k_extend[0] = delta_k/2
     
     def calc_model_simple(self, k_range):
         # unit check and fix
-        if self.beta.unit != (self.surf_unit**2 * self.k_data.unit**(-self.alpha+2)):
+        if self.beta.unit != (self.surf_unit**2 * self.k_data.unit**(self.alpha-2)):
             raise Exception('beta units do not match with surface units, k-space units, and alpha.')
-        self.psd_simple = model_full(k=k_range, psd_parm=[[self.alpha, self.beta, 0.0/k_data.unit,
-                                                           0.0, 0.0*self.p_data.unit]]) # units safe
+        self.psd_simple = model_full(k=k_range, psd_parm=[self.alpha, self.beta, 0.0/self.k_data.unit,
+                                                           0.0, 0.0*self.p_data.unit]) # units safe
     
     def calc_bsr(self, rms_sr):
         # unit check and fix
