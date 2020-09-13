@@ -147,10 +147,21 @@ class surfPSD:
             hannWin = dfx.fill_surface(hannWin, self.mask, ap_clear, ap_coords)
         
         # zero pad to oversample then start taking FT's
-        pad_side = int((self.oversamp - self.mask.shape[0])/2)
-        optic_ovs = np.pad(hannWin, pad_side, pad_with)
-        if optic_ovs.shape[0] != self.oversamp: # I hope this doesn't break things
-            self.oversamp = optic_ovs.shape[0]
+        pad_side = (self.oversamp - self.mask.shape[0])/2
+        if pad_side%1 != 0: # fractional pixel present for padding
+            pad_side_a = int(np.floor(pad_side))
+            pad_side_b = int(self.oversamp - self.mask.shape[0] - pad_side_a)
+            optic_ovs = np.pad(hannWin, ((pad_side_a, pad_side_b), (pad_side_a, pad_side_b)), 
+                               'constant', constant_values=0)
+        else: # no fractional pixel present for padding
+            pad_side = int(pad_side)
+            optic_ovs = np.pad(hannWin, ((pad_side, pad_side), (pad_side, pad_side)), 
+                               'constant', constant_values=0)
+        assert (np.shape(optic_ovs)[0] == self.oversamp), "Padding does not match desired oversample size"
+        
+        #optic_ovs = np.pad(hannWin, pad_side, pad_with)
+        #if optic_ovs.shape[0] != self.oversamp: # I hope this doesn't break things
+        #    self.oversamp = optic_ovs.shape[0]
         FT_wf = np.fft.fftshift(np.fft.fft2(optic_ovs))*self.data.unit # this comes out unitless, reapply
         self.psd_raw = np.real(FT_wf*np.conjugate(FT_wf))#/(self.data.unit**2)
         # psd_raw should be in units of [data]**2
@@ -673,6 +684,51 @@ def getSampSide(optic_data):
         samp = 1024
     
     return samp
+
+def do_psd_radial(ring_width, psd_data, dk, kmin):
+    # generic version of code if inputting a different ring width and PSD data set
+    # make grid for average radial power value
+    if hasattr(psd_data, 'unit'):
+        psd_data = psd_data.value
+    side = np.shape(psd_data)[0]
+    shift = int(side/2)
+    radial_freq = np.linspace((-shift*dk), (shift*dk), side, endpoint=False)
+    radial_freq = radial_freq[shift:side] # only pick the right side for content
+    #shift = np.int(self.oversamp/2)
+    if side%2 != 0:
+        maskY, maskX = np.ogrid[-shift:shift+1, -shift:shift+1]
+    else:
+        maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
+        
+    # set up ring parameters
+    if ring_width % 2 == 0:
+        ring_width += 1 # increase by 1 to make it odd
+    r_halfside = np.int((ring_width-1)/2)
+    r = 1
+
+    # initialize content
+    mean_bin = [] # initialize empty list of mean PSD values
+    k_val = [] # initialize empty list of spatial frequencies
+    
+    # chug along through the radial frequency values
+    while((r+r_halfside)<shift): # while inside the region of interest
+        ri = r - r_halfside # inner radius of ring
+        if radial_freq[r].value <= kmin.value: # verify that position r is at the low limit
+            #print('test k-value too small, iterate to next')
+            r+=1
+        else:
+            if ri > 0:
+                radial_mask = psd.makeRingMask(maskY, maskX, ri, ring_width)
+                radial_bin = psd.makeRingMaskBin(psd_data,radial_mask)
+                mean_bin.append(np.mean(radial_bin))
+                k_val.append(radial_freq[r].value)
+            r+=ring_width # iterate to the next r value in the loop
+
+    k_radial = k_val * radial_freq.unit
+    psd_radial = mean_bin #* psd_data.unit
+
+    return (k_radial, psd_radial)
+
 
 def makeRingMask(y,x,inner_r,r_width):
     '''

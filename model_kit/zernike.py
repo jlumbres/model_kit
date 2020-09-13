@@ -11,6 +11,7 @@ import copy
 from astropy import units as u
 from scipy.special import factorial
 from model_kit import datafiles as dfx
+import poppy
 
 ######################################
 
@@ -80,16 +81,18 @@ def convert_noll(j):
     
     return (n, m)
 
-def calc_zernike_phase(j_index, aperture, j_type = 'noll'):
+def calc_zernike_phase(j_index, ap_diam, j_type = 'noll'):
     '''
     Calculates Normalized Zernike function given Zernike index (j_index) based on some basis type (j_type)
     Based around aperture mask
     Code is heavily influenced from Michael Hart's OPTI 528 course
     '''
     if j_type == 'noll':
-        (n,m) = convert_noll(j)
+        (n,m) = convert_noll(j_index)
+    elif j_type == 'osa':
+        (n,m) = convert_osa(j_index)
     else:
-        (n,m) = convert_osa(j)
+        raise Exception('Try again. Can only convert "Noll" or "osa" index')
         
     ma = np.absolute(m)
     if (n<ma) or (n<0): # zernike integers
@@ -100,15 +103,16 @@ def calc_zernike_phase(j_index, aperture, j_type = 'noll'):
         raise Exception('Try again. n-m must be even.\nGiven: n={0}, m={1}'.format(n,m))
     
     # Set up the grid to calculate rho and theta
-    ap_diam = np.shape(aperture)[0]
+    #ap_diam = np.shape(aperture)[0]
     c1 = -((ap_diam-1)/2)
     c2 = ap_diam+c1-1
     x = np.linspace(c1, c2, ap_diam)
     y = np.linspace(c1, c2, ap_diam)
     xv, yv = np.meshgrid(x,y)
     yv = yv[::-1]
-    rho = np.sqrt((xv**2) + (yv**2))/ap_diam*2
+    rho = np.sqrt((xv**2) + (yv**2))/ap_diam*2 # unit circle
     theta = np.arctan2(yv,xv)
+    #aperture = (rho<=1).astype(int)
 
     # Calculate the radial polynomial
     R = 0
@@ -119,30 +123,71 @@ def calc_zernike_phase(j_index, aperture, j_type = 'noll'):
 
     # Calculate the Zernike polynomial
     if m>0: # "even" zernike
-        zern = np.sqrt(2*(n+1)) * R * aperture * np.cos(ma*theta)
+        zern = np.sqrt(2*(n+1)) * R * np.cos(ma*theta)
     elif m<0: # odd zernike
-        zern = np.sqrt(2*(n+1)) * R * aperture * np.sin(ma*theta)
+        zern = np.sqrt(2*(n+1)) * R * np.sin(ma*theta)
     else: # m==0
-        zern = np.sqrt(n+1) * R * aperture
+        zern = np.sqrt(n+1) * R
         
     # No need to tighten the matrix because passed in the aperture
     return zern * u.radian
 
-def calc_zernike_proj(data, mask, z_coeff, index_type='noll'):
+def calc_zernike_proj(data, nterms, wavelength=None, mask_full=None, mask_dust=None, index_type='noll'):
     '''
     Calculates the Zernike projection presence for a particular single index value
     Index type should be changed to 
     '''
     # check the units of data that it is in phase otherwise this doesn't work
     if data.unit != u.radian:
-        raise Exception('Data units must be in phase (radians)')
-    # calculate the zernike surface
-    zern = calc_zernike_phase(j_index=z_coeff, aperture=mask, j_type=index_type)
-    # do the dot product (dp)
+        #raise Exception('Data units must be in phase (radians)')
+        if wavelength is not None:
+            data = data / (wavelength.to(data.unit) / (2*np.pi*u.radian))
+        else:
+            raise Exception('Missing wavelength with units to convert surface to phase')
+    
     vec1d = np.product(data.shape)
-    dp_num = np.dot(np.reshape(data.value, (vec1d)), np.reshape(zern.value,(vec1d)))
-    dp_den = np.dot(np.reshape(zern.value, (vec1d)), np.reshape(zern.value,(vec1d)))
-    return (zern, dp_num/dp_den)
+    
+    # build the Zernike phase maps
+    # only choose the regions where there is data present for the fitting
+    if mask_dust is not None:
+        zern_maps = poppy.zernike.arbitrary_basis(aperture=mask_dust, nterms=nterms, outside=0.0)
+        mask_1d_coord = np.where(np.reshape(mask_dust, (vec1d))==True)
+    elif mask_full is not None:
+        zern_maps = np.zeros((nterms, data.shape[0], data.shape[1]))
+        for j in range(0, nterms):
+            zern_maps[j] = calc_zernike_phase(j_index=j+1, ap_diam=data.shape[0])
+        mask_1d_coord = np.where(np.reshape(mask_full, (vec1d))==True)
+    else:
+        raise Exception('Need an aperture mask passed in, either mask_full or mask_dust')
+    
+    # calculate the zernike surface projections
+    data_active = np.reshape(data, (vec1d))[mask_1d_coord]
+    zern_proj = np.zeros((nterms))
+    for j in range(0, nterms):
+        zern_active = np.reshape(zern_maps[j], vec1d)[mask_1d_coord]
+        dp_num = np.dot(data_active, zern_active)
+        dp_den = np.dot(zern_active, zern_active)
+        zern_proj[j] = dp_num/dp_den
+
+    return (zern_maps*u.radian, zern_proj)
+
+'''
+def gen_zernike_maps(nterms, mask_full):
+    zern_maps = np.zeros((nterms, mask_full.shape[0], mask_full.shape[1]))
+    for j in range(0, nterms):
+        zern_maps[j] = calc_zernike_phase(j_index=j+1, ap_diam = mask_full.shape[0]).value
+    return zern_maps*u.radian
+'''
+
+def gen_zernike_maps(nterms, mask_full):
+    zern_maps = np.zeros((nterms, mask_full.shape[0], mask_full.shape[1]))
+    for j in range(0, nterms):
+        zmap = calc_zernike_phase(j_index=j+1, ap_diam = mask_full.shape[0]).value *mask_full
+        if j%2==0: # at even values, do a vertical flip of the data.
+            zmap = np.flipud(zmap)
+        zern_maps[j] = zmap
+    return zern_maps#*u.radian
+
 
 def remove_zernike(data, mask, wave_num, tot_j):
     '''
@@ -182,7 +227,7 @@ def add_zernike(data, mask, wave_num, z_weights):
     Didn't expect to do this, but here we are
     '''
     for ji in range(0, z_weights.shape[0]):
-        zernike_surf = z_weights[ji] * calc_zernike_phase(j_index=ji+1, aperture=mask) * wave_num
+        zernike_surf = z_weights[ji] * calc_zernike_phase(j_index=ji+1, ap_diam=mask.shape[0]) * wave_num
         data = data + zernike_surf
         
     return data

@@ -56,7 +56,7 @@ def surfFITS(file_loc, optic_type, opdunit, name):
     return optic_surf
 
 
-def writeOPDfile(opd_surf_data, pixelscl, fileloc):
+def writeOPDfile(opd_surf_data, pixelscl, fileloc, write_file=True):
     '''
     Writes OPD mask to FITS file, WILL OVERRIDE OLD FILE IF fileloc IS REUSED
     Input Parameters:
@@ -74,10 +74,13 @@ def writeOPDfile(opd_surf_data, pixelscl, fileloc):
     writeOPD.header.comments['PUPLSCAL'] = 'pixel scale [m/pix]'
     writeOPD.header.set('BUNIT', 'meters')
     writeOPD.header.comments['BUNIT'] = 'opd units'
-    writeOPD.writeto(fileloc, overwrite=True)
+    if write_file==True:
+        writeOPD.writeto(fileloc, overwrite=True)
+    else:
+        return writeOPD
 
 
-def writeTRANSfile(trans_data, pixelscl, fileloc):
+def writeTRANSfile(trans_data, pixelscl, fileloc, write_file=True):
     '''
     Writes transmission mask to FITS file, WILL OVERRIDE OLD FILE IF fileloc IS REUSED
     Input Parameters:
@@ -93,7 +96,10 @@ def writeTRANSfile(trans_data, pixelscl, fileloc):
     writetrans = fits.PrimaryHDU(data=trans_data)
     writetrans.header.set('PUPLSCAL', pixelscl)
     writetrans.header.comments['PUPLSCAL'] = 'pixel scale [m/pix]'
-    writetrans.writeto(fileloc, overwrite=True)
+    if write_file==True:
+        writetrans.writeto(fileloc, overwrite=True)
+    else:
+        return writetrans
 
 
 def makeRxCSV(csv_file, print_names=False):
@@ -115,7 +121,7 @@ def makeRxCSV(csv_file, print_names=False):
     return sys_rx
 
 
-def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
+def csvFresnel(rx_csv, samp, oversamp, break_plane, wf_insert=None, psd_dict=None, seed=None):
     '''
     Builds FresnelOpticalSystem from a prescription CSV file passed in and using PSD WFE class.
     Input parameters:
@@ -137,13 +143,33 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
         sys_build : poppy.FresnelOpticalSystem object 
             Complete optical system built with propagation, prescriptions included
     '''
-    M1_radius=rx_csv['Radius_m'][1]*u.m # Element [1] is M1 because Element [0] is the pupil mask
+    entrance_radius=rx_csv['Radius_m'][0]*u.m 
     
-    sys_build = poppy.FresnelOpticalSystem(pupil_diameter=2*M1_radius, npix=samp, beam_ratio=oversamp)
+    sys_build = poppy.FresnelOpticalSystem(pupil_diameter=2*entrance_radius, npix=samp, beam_ratio=oversamp)
 
     # Entrance Aperture
-    sys_build.add_optic(poppy.CircularAperture(radius=M1_radius))
-
+    sys_build.add_optic(poppy.CircularAperture(radius=entrance_radius))
+    
+    # Check to initialize with an input wavefront from previous calculation
+    if wf_insert is not None:
+        sys_build.input_wavefront(wf_insert=wf_insert)
+        '''
+        wf_opd = wf_insert.phase * wf_insert.wavelength / (2*np.pi)
+        fits_opd = fits.PrimaryHDU(data=np.float_(wf_opd.value))
+        fits_opd.header.set('PUPLSCAL', wf_insert._pixelscale_m.value)
+        fits_opd.header.set('BUNIT', 'meters')
+        write_opd = fits.HDUList([fits_opd])
+        
+        #fits_trans = fits.PrimaryHDU(data=np.float_(wf_insert.amplitude))
+        #fits_trans.header.set('PUPLSCAL', wf_insert._pixelscale_m.value)
+        #write_trans = fits.HDUList([fits_trans])
+        
+        sys_build.add_optic(poppy.FITSOpticalElement(name='wavefront OPD', opd=write_opd,
+                                                     opdunits='meters'))
+        #sys_build.add_optic(poppy.FITSOpticalElement(name='wavefront TRANS', 
+        #                                             transmission=write_trans))
+        '''
+        
     # Build MagAO-X optical system from CSV file
     for n_optic,optic in enumerate(rx_csv): # n_optic: count, optic: value
 
@@ -157,7 +183,7 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, psd_dict=None, seed=None):
             if surf_filename[0:3] == 'psd': # check if surface needs to be built using PSD parameters
                 psd_parm = psd_dict[surf_filename]
                 psd_weight = psd_dict[surf_filename+'_weight']
-                if seed != None:
+                if seed is not None:
                     psd_seed = seed[n_optic]
                 else:
                     psd_seed = None

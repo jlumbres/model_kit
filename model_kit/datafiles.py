@@ -125,7 +125,10 @@ def write_fits(surface, mask, surf_parms, filename, save_mask=True, surf_nan=Fal
     
     # write mask file
     if save_mask==True:
+        #hold_bitpix = header['bitpix']
+        header['bitpix'] = -64
         fits.writeto(filename + '_mask.fits', mask.astype(int), header, overwrite=True)
+        #header['bitpix'] = hold_bitpix
     
     # write surface file
     if surf_nan==True:  # if the surface to be written to FITS should be the masked nan version
@@ -193,6 +196,19 @@ def fill_surface(surface, mask_data, ap_clear, ap_coords, method='cubic'):
 def reduce_ca(data, mask, old_ca, new_ca):
     if old_ca < new_ca:
         raise Exception('New CA is larger than old CA, fix this')
+    
+    diam_new = mask.shape[0] * (new_ca/old_ca)
+    
+    # calculate the grid
+    cen = int(mask.shape[0]/2)
+    yy, xx = np.ogrid[-cen:cen, -cen:cen]
+    r = np.sqrt(xx**2 + yy**2)
+    ap_new = (r<=(diam_new/2))
+    
+    # tighten down the matrix
+    data_newca, mask_newca = mat_tight(data=data*ap_new, mask=ap_new)
+    
+    return data_newca, mask_newca
     
 
 def mat_tight(data, mask, print_mat=False):
