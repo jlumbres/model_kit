@@ -10,6 +10,7 @@ This modular function file has the following goals:
 import numpy as np
 import copy
 from scipy import interpolate
+from datetime import datetime
 
 # for calling in data
 from astropy.io import fits
@@ -307,6 +308,126 @@ class surfPSD:
         
         # Write to FITS file
         fits.writeto(filename, write_data, hdr, overwrite=True)
+
+##########################################
+# PSD SPECIAL CASE: 2-D LOMB-SCARGLE
+def mvls_psd(data, mask, dx, k_side, print_update=False, 
+             write_psd=False, psd_name=None):
+    
+    # do some quick checking before running the whole code
+    if write_psd == True and psd_name == None:
+        raise Exception('Cannot write PSD to FITS file without psd_name passed in.')
+    
+    # create the vector array for spatial coordinates
+    data_side = np.shape(data)[0]
+    cen = int(data_side/2)
+    if data_side % 2 == 0: # even width
+        yy, xx = np.mgrid[-cen:cen, -cen:cen]
+    else:
+        yy, xx = np.mgrid[-cen:cen+1, -cen:cen+1]
+    tnx = xx * dx.value # unitless
+    tny = yy * dx.value # unitless
+    
+    # load the data and apply a window to it
+    surf_win = data.value * han2d((data_side, data_side)) # unitless
+    
+    # filter the data using the mask
+    mask_filter = np.where(mask==1) # automatically vectorizes the data
+    tn = np.vstack((tnx[mask_filter], tny[mask_filter]))
+    ytn = surf_win[mask_filter]
+    
+    # build the spatial frequency coordinates
+    # k_side is not necessarily the same size as the data coming in.
+    dk = 1/(data_side*dx.value) # unitless
+    k_tot = k_side**2
+    k_cen = int(k_side/2)
+    if k_side % 2 == 0:
+        ky, kx = np.mgrid[-k_cen:k_cen, -k_cen:k_cen]
+    else:
+        ky, kx = np.mgrid[-k_cen:k_cen+1, -k_cen:k_cen+1]
+    kx = kx*dk
+    ky = ky*dk
+    wkx = np.reshape(kx, k_tot) # unitless
+    wky = np.reshape(ky, k_tot) # unitless
+    
+    '''
+    By this point, to do the Lomb-Scargle, the following should be unitless:
+    tn, ytn, wkx, wky
+    This will allow tau, ak, bk to be unitless.
+    The units will all be reapplied at the end
+    '''
+    
+    # initialize variables for the Lomb-Scargle
+    tau = np.zeros((k_tot))
+    ak = np.zeros((k_tot))
+    bk = np.zeros((k_tot))
+    
+    # begin the scargling
+    if print_update == True:
+        print('Scargling in progress, starting time =', datetime.now().strftime("%H:%M:%S"))
+    for nk in range(0, k_tot):
+        # calculate the dot product
+        wkvec = ([wkx[nk], wky[nk]])
+        wdt = np.dot(wkvec, tn) * 2 * np.pi # mandatory 2pi for radians units
+        
+        # calculate tau
+        tau_num = np.sum(np.cos(2*wdt))
+        tau_denom = np.sum(np.sin(2*wdt))
+        tau_val = 0.5 * np.arctan2(tau_num, tau_denom) # tau is radians here
+        tau[nk] = tau_val # load into the tau array
+        
+        # calculate inner pdoruct for ak and bk
+        inner_calc = wdt - tau_val
+        akcos = np.cos(inner_calc)
+        bksin = np.sin(inner_calc)
+        
+        # solve for ak
+        ak_num = np.sum(ytn*akcos)
+        ak_denom = np.sum(akcos**2)
+        ak[nk] = ak_num/ak_denom
+        
+        # solve for bk
+        bk_num = np.sum(ytn*bksin)
+        bk_denom = np.sum(bksin**2)
+        bk[nk] = bk_num/bk_denom
+        
+        # print out updates if requested
+        if print_update == True:
+            if nk % 10000 == 0:
+                print('{0} of {1} complete ({2:.2f}%), time ='.format(nk, k_tot, 
+                                                                      nk*100/k_tot)
+                , datetime.now().strftime("%H:%M:%S"))
+        
+    # outside the loop, all of tau, ak, bk should be filled in
+    # calculate the PSD
+    psd = ((ak**2) + (bk**2)) / (dk**2)
+    psd = np.reshape(psd, (k_side, k_side)) * (data.unit*dx.unit)**2
+    if print_update == True:
+        print('Scargling and PSD completed, ending time =', datetime.now().strftime("%H:%M:%S"))
+    
+    if write_psd==True: # write PSD to fits file if requested
+        hdr = fits.Header()
+        hdr['name'] = (psd_name, 'filename')
+        hdr['psd_unit'] = (str(psd.unit), 'Units for PSD data')
+        hdr['surfunit'] = (str(data.unit), 'Units used for surface data')
+        hdr['latres'] = (dx.value, 'Data spatial resolution [{0}]'.format(dx.unit))
+        hdr['diam_ca'] = (data_side*dx.value, 'Physical diameter for clear aperture [{0}]'.format(dx.unit))
+        hdr['diam_pix'] = (data_side, 'Pixel diameter for data clear aperture')
+        hdr['delta_k'] = (dk, 'Spatial frequency lateral resolution [1/{0}]'.format(dx.unit))
+        
+        fits.writeto(psd_name+'.fits', psd.value, hdr, overwrite=True)
+    
+    # apply all the units
+    lspsd_parms = {'dk': dk/dx.unit,
+                   'radialFreq': kx[0]/dx.unit}
+    
+    return psd, lspsd_parms
+    
+
+
+
+
+
 ##########################################
 # MODELING
 '''
@@ -711,7 +832,7 @@ def do_psd_radial(ring_width, psd_data, dk, kmin):
     k_val = [] # initialize empty list of spatial frequencies
     
     # chug along through the radial frequency values
-    while((r+r_halfside)<shift): # while inside the region of interest
+    while((r+r_halfside)<shift): # while inside the region of inteest
         ri = r - r_halfside # inner radius of ring
         if radial_freq[r].value <= kmin.value: # verify that position r is at the low limit
             #print('test k-value too small, iterate to next')
@@ -729,6 +850,33 @@ def do_psd_radial(ring_width, psd_data, dk, kmin):
 
     return (k_radial, psd_radial)
 
+def new_psd_radial(psd_data, radial_freq):
+    # a different version for less frills.
+    if hasattr(psd_data, 'unit'):
+        psd_data = psd_data.value
+    side = np.shape(psd_data)[0]
+    shift = int(side/2)
+    if side%2 != 0:
+        maskY, maskX = np.ogrid[-shift:shift+1, -shift:shift+1]
+    else:
+        maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
+
+    # initialize content
+    mean_bin = [] # initialize empty list of mean PSD values
+    k_val = [] # initialize empty list of spatial frequencies
+    
+    for test_radius in range(1, shift):
+        ring_mask_in = maskX**2 + maskY**2 <= (test_radius-1)**2
+        ring_mask_out = maskX**2 + maskY**2 <= (test_radius+1)**2
+        ring_mask = ring_mask_out ^ ring_mask_in
+        ring_bin = np.extract(ring_mask, psd_data)
+        mean_bin.append(np.mean(ring_bin))
+        k_val.append(radial_freq[test_radius])
+
+    k_radial = k_val
+    psd_radial = mean_bin #* psd_data.unit
+
+    return (k_radial, psd_radial)
 
 def makeRingMask(y,x,inner_r,r_width):
     '''
