@@ -341,6 +341,31 @@ def show2plots(supertitle, data1, plot1_label, data2, plot2_label, set_figsize=[
     ax2.set_title(plot2_label)
     fig.colorbar(img2, cax=cax2, orientation='horizontal').set_label(cb_label)
     
+def calc_axis(side_len, dx=None):
+    cen = int(side_len/2)
+    if (side_len % 2) == 0:
+        side_axis = np.linspace(start=-cen, stop=cen, endpoint=False, num=side_len)
+    else:
+        side_axis = np.linspace(start=-cen, stop=cen, endpoint=True, num=side_len)
+    if dx is not None:
+        side_axis = side_axis * dx
+    return side_axis
+
+def show_image(data, pixscale, fig_title, data_unit=None, dpi=100):
+    surf_axis = calc_axis(np.shape(data)[0], pixscale)
+    axis_low = np.amin(surf_axis)
+    axis_high = np.amax(surf_axis)
+    plt.figure(dpi=dpi)
+    plt.imshow(data, origin='lower',
+              extent=[axis_low.value, axis_high.value, axis_low.value, axis_high.value])
+    plt.xlabel(surf_axis.unit)
+    plt.ylabel(surf_axis.unit)
+    plt.title(fig_title)
+    if hasattr(data, 'unit'):
+        plt.colorbar().set_label(data.unit)
+    elif data_unit is not None:
+        plt.colorbar().set_label(data_unit)
+    
 ############################################
 # POTENTIALLY OBSOLETE
 def adjustData(optic): # this might be obsolete?
