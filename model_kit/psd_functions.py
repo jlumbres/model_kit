@@ -11,6 +11,9 @@ import numpy as np
 import copy
 from scipy import interpolate
 from datetime import datetime
+import os
+from matplotlib import gridspec
+import matplotlib.pyplot as plt
 
 # for calling in data
 from astropy.io import fits
@@ -82,18 +85,18 @@ class surfPSD:
         elif psd_type == 'cal':
             self.psd_cal = psd_fits.data * (self.diam_ca.unit**2) * (var_unit**2)
             
-    def load_psd(self, psd_data, psd_type, var):
-        if hasattr(var, 'unit'):
-            self.var = var
-        else:
-            raise Exception('Variance needs units')
+    def load_psd(self, psd_data, psd_type, var=None):
+        #if var is not None and hasattr(var, 'unit'):
+        #    self.var = var
+        #else:
+        #    raise Exception('Variance pass in needs units')
         if hasattr(psd_data, 'unit'):
             if psd_type=='norm':
                 self.psd_norm=psd_data
                 self.psd_cal = self.psd_norm * var 
             elif psd_type=='cal':
                 self.psd_cal=psd_data
-                self.psd_norm = self.psd_cal / var
+                #self.psd_norm = self.psd_cal / var
             elif psd_type=='raw':
                 self.psd_raw=psd_raw
             else:
@@ -101,22 +104,31 @@ class surfPSD:
         else:
             raise Exception('PSD needs units')
         
-    def load_psd_parameters(self, oversamp, diam_ca, npix_diam, wavelen):
-        self.oversamp = oversamp
+    def load_psd_parameters(self, diam_ca, npix_diam, wavelen,delta_k=None, oversamp=None):
         self.diam_ca = diam_ca
         self.npix_diam = npix_diam
         self.wavelen = wavelen
-        self.calc_psd_parameters() # calculate other necessary parameters
+        if oversamp is not None:
+            self.oversamp = oversamp
+        else:
+            self.oversamp = np.shape(self.psd_cal.value)[0]
+        self.calc_psd_parameters(delta_k=delta_k) # calculate other necessary parameters
     
-    def calc_psd_parameters(self):
+    def calc_psd_parameters(self, delta_k=None):
         self.k_min = 1/self.diam_ca
         self.k_max = 1/(2*self.diam_ca / self.npix_diam)
-        self.delta_k = 1/(self.oversamp*self.diam_ca/self.npix_diam)
+        if delta_k is not None:
+            self.delta_k = delta_k
+        else:
+            self.delta_k = 1/(self.oversamp*self.diam_ca/self.npix_diam)
         
         # Set full radial frequency range
+        '''
+        # Not necessary anymore with code edits
         samp_space = self.diam_ca / self.npix_diam
         ft_freq = np.fft.fftfreq(n=self.oversamp, d=samp_space)
-        self.radialFreq = ft_freq[0:np.int(self.oversamp/2)]
+        self.radialFreq = ft_freq[0:np.int(self.oversamp/2)] # not necessary anymore?
+        '''
         
     def calc_psd(self, oversamp, kmid_ll = 0.1/u.mm, khigh_ll=1/u.mm, var_unit = u.nm):
         self.oversamp = oversamp
@@ -202,89 +214,25 @@ class surfPSD:
     
     def calc_psd_radial(self, ring_width):
         # shortcut version for basic code analysis
-        (self.k_radial, self.psd_radial_cal) = self.do_psd_radial(ring_width=ring_width,
-                                                                  psd_data = self.psd_cal)
-
-    def do_psd_radial(self, ring_width, psd_data):
-        # generic version of code if inputting a different ring width and PSD data set
-        # make grid for average radial power value
-        shift = np.int(self.oversamp/2)
-        if self.oversamp%2 != 0:
-            maskY, maskX = np.ogrid[-shift:shift+1, -shift:shift+1]
-        else:
-            maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
-        
-        # set up ring parameters
-        if ring_width % 2 == 0:
-            ring_width += 1 # increase by 1 to make it odd
-        r_halfside = np.int((ring_width-1)/2)
-        r = 1
-        
-        # initialize content
-        mean_bin = [] # initialize empty list of mean PSD values
-        k_val = [] # initialize empty list of spatial frequencies
-        
-        # chug along through the radial frequency values
-        while((r+r_halfside)<shift): # while inside the region of interest
-            ri = r - r_halfside # inner radius of ring
-            if self.radialFreq[r].value < self.k_min.value: # verify that position r is at the low limit
-                #print('test k-value too small, iterate to next')
-                r+=1
-            else:
-                if ri > 0:
-                    radial_mask = makeRingMask(maskY, maskX, ri, ring_width)
-                    radial_bin = makeRingMaskBin(psd_data.value,radial_mask)
-                    mean_bin.append(np.mean(radial_bin))
-                    k_val.append(self.radialFreq[r].value)
-                r+=ring_width # iterate to the next r value in the loop
-                
-        k_radial = k_val * self.radialFreq.unit
-        psd_radial = mean_bin * psd_data.unit
-        
-        return (k_radial, psd_radial)
+        #(self.k_radial, self.psd_radial_cal) = self.do_psd_radial(ring_width=ring_width,
+        #                                                          psd_data = self.psd_cal)
+        (self.k_radial, self.psd_radial_cal) = do_psd_radial(psd_data=self.psd_cal, delta_k=self.delta_k, ring_width=ring_width)
     
-    def calc_rms_set(self, kmid_ll, khigh_ll, pwr_opt):
+    def calc_rms_set(self, kmid_ll, khigh_ll, pwr_opt, print_rms=False, print_kloc=False):
         # Calculate the RMS based on the k-parameter limits
         # all RMS units are same units as data and variance.
         self.kmid_ll = kmid_ll
         self.khigh_ll = khigh_ll
-        self.rms_tot = self.calc_psd_rms(tgt_low=self.k_min, tgt_high=self.k_max,
-                                     pwr_opt=pwr_opt)
-        self.rms_l = self.calc_psd_rms(tgt_low=self.k_min, tgt_high=kmid_ll,
-                                     pwr_opt=pwr_opt)
-        self.rms_m = self.calc_psd_rms(tgt_low=kmid_ll, tgt_high=khigh_ll,
-                                     pwr_opt=pwr_opt)
-        self.rms_h = self.calc_psd_rms(tgt_low=khigh_ll, tgt_high=self.k_max,
-                                        pwr_opt=pwr_opt)
-        self.rms_mh = self.calc_psd_rms(tgt_low=kmid_ll, tgt_high=self.k_max,
-                                        pwr_opt=pwr_opt)
-    
-    def calc_psd_rms(self, tgt_low, tgt_high, pwr_opt, print_rms=False, print_kloc = False):
-        # all RMS units are same units as data and variance.
-        if tgt_low > tgt_high:
-            raise Exception('Spatial Frequency region not possible; tgt_low ({0:.3f}) greater than tgt_high ({1:.3f})'.format(tgt_low, tgt_high))
-        # find the locations for k_low and k_high:
-        (bin_low, k_low) = k_locate(self.radialFreq, tgt_low, print_change=print_kloc)
-        (bin_high, k_high) = k_locate(self.radialFreq, tgt_high, print_change=print_kloc)
-        ring_width = bin_high - bin_low
-        
-        # make a grid for the average radial power value
-        shift = np.int(self.oversamp/2)
-        if self.oversamp %2 != 0:
-            maskY, maskX = np.ogrid[-shift:shift+1, -shift:shift+1]
-        else:
-            maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
-        
-        # make the mask
-        radial_mask = makeRingMask(maskY, maskX, bin_low, ring_width)
-        radial_bin = makeRingMaskBin(pwr_opt.value,radial_mask) * pwr_opt.unit
-        
-        # calculate the rms
-        rms_val = np.sqrt(np.sum(radial_bin * (self.delta_k**2)))
-        if print_rms==True:
-            print('Target range - k_low: {0:.3f} and k_high: {1:.3f}'.format(k_low, k_high))
-            print('RMS value: {0:.4f}'.format(rms_val))
-        return rms_val
+        self.rms_tot = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[self.k_min, self.k_max],
+                                  print_rms=print_rms, print_kloc=print_kloc)
+        self.rms_l = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[self.k_min, kmid_ll],
+                                  print_rms=print_rms, print_kloc=print_kloc)
+        self.rms_m = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[kmid_ll, khigh_ll],
+                                  print_rms=print_rms, print_kloc=print_kloc)
+        self.rms_h = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[khigh_ll, self.k_max],
+                                  print_rms=print_rms, print_kloc=print_kloc)
+        self.rms_mh = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[kmid_ll, self.k_max],
+                                  print_rms=print_rms, print_kloc=print_kloc)
     
     def write_psd_file(self, filename, psd_data, single_precision=True):
         # Write header and cards for FITS
@@ -312,11 +260,20 @@ class surfPSD:
 ##########################################
 # PSD SPECIAL CASE: 2-D LOMB-SCARGLE
 def mvls_psd(data, mask, dx, k_side, print_update=False, 
-             write_psd=False, psd_name=None):
+             write_psd=False, psd_name=None, psd_folder=None):
     
     # do some quick checking before running the whole code
-    if write_psd == True and psd_name == None:
-        raise Exception('Cannot write PSD to FITS file without psd_name passed in.')
+    if write_psd == True:
+        if psd_name == None:
+            raise Exception('Cannot write PSD to FITS file without psd_name passed in.')
+        if psd_folder is not None:
+            if os.path.isdir(psd_folder) is False:
+                # check if it's a weird path, then fix it
+                folder_dir = os.getcwd() + '/' + psd_folder
+                if os.path.isdir(folder_dir) is True:
+                    psd_folder = folder_dir
+                else:
+                    raise Exception('PSD folder destination bad; please check again')
     
     # create the vector array for spatial coordinates
     data_side = np.shape(data)[0]
@@ -415,7 +372,12 @@ def mvls_psd(data, mask, dx, k_side, print_update=False,
         hdr['diam_pix'] = (data_side, 'Pixel diameter for data clear aperture')
         hdr['delta_k'] = (dk, 'Spatial frequency lateral resolution [1/{0}]'.format(dx.unit))
         
-        fits.writeto(psd_name+'.fits', psd.value, hdr, overwrite=True)
+        if psd_folder is not None:
+            psd_filename = psd_folder+psd_name+'.fits'
+        else:
+            psd_filename = psd_name+'.fits'
+        
+        fits.writeto(psd_filename, psd.value, hdr, overwrite=True)
     
     # apply all the units
     lspsd_parms = {'dk': dk/dx.unit,
@@ -423,11 +385,6 @@ def mvls_psd(data, mask, dx, k_side, print_update=False,
     
     return psd, lspsd_parms
     
-
-
-
-
-
 ##########################################
 # MODELING
 '''
@@ -446,16 +403,21 @@ radial_k        - 1/mm (spatial frequency)
 radial_psd      - mm^2 nm^2 (1/spatial frequency ^2 * variance = mm^2 nm^2)
 bsr        - mm^2 nm^2 (same units as psd)
 '''
-class model:
-    def __init__(self, region_num, ind_start, ind_end, k_radial, p_radial, k_min, k_max):
+class model(surfPSD):
+    #def __init__(self, region_num, ind_start, ind_end, k_radial, p_radial, k_min, k_max):
+    def __init__(self, region_num):#, ind_start, ind_end, surfPSD):
         self.region_num = region_num
+    
+    def set_parm(self, ind_range, k_radial, p_radial, k_min, k_max):
         if hasattr(k_radial, 'unit') and hasattr(p_radial, 'unit'):
             self.k_radial = k_radial
-            self.k_data = k_radial[ind_start:ind_end+1]
-            self.p_data = p_radial[ind_start:ind_end+1]
+            self.p_radial = p_radial
+            self.k_data = k_radial[ind_range[0]:ind_range[1]+1]
+            self.p_data = p_radial[ind_range[0]:ind_range[1]+1]
             self.surf_unit = (p_radial.unit*(k_radial.unit**2))**(0.5) # sqrt alternative
         else:
             raise Exception('k-space and/or PSD data need units.')
+        
         if hasattr(k_min, 'unit'):
             if (k_min.unit != k_radial.unit):
                 self.k_min = k_min.to(k_radial.unit)
@@ -471,6 +433,20 @@ class model:
         else:
             raise Exception('k_max needs units and preferably should match with k_radial')
     
+    def load_parm(self, ind_range, psd_obj=None):
+        self.i_start = ind_range[0]
+        self.i_end = ind_range[1]
+        if psd_obj is not None: # passed in a separate object
+            self.k_data = psd_obj.k_radial[ind_range[0]:ind_range[1]+1]
+            self.p_data = psd_obj.psd_radial_cal[ind_range[0]:ind_range[1]+1]
+            self.k_min = psd_obj.k_min
+            self.k_max = psd_obj.k_max
+        else: # surfPSD methods were used and was calculated
+            self.k_data = self.k_radial[ind_range[0]:ind_range[1]+1]
+            self.p_data = self.psd_radial_cal[ind_range[0]:ind_range[1]+1]
+            # self.k_min and self.k_max not needed because pre-existing
+        self.surf_unit = (self.p_data.unit*(self.k_data.unit**2))**(0.5) # sqrt alternative
+    
     def solve_lsf(self):      
         # linearized equation from PSD in form y = mx + c
         y = np.log10(self.p_data.value)
@@ -480,13 +456,11 @@ class model:
         m,c = np.linalg.lstsq(A, y)[0] # y = mx + c linear equation
         self.alpha = -1*m # unitless naturally
         self.beta = 10**(c) * (self.surf_unit**2) / (self.k_data.unit**(-self.alpha+2))
-    
+    '''
     def extend_k(self, delta_k, k_limit):
         # Expand spatial freq range to see where the model takes us with the data
-        N = np.ceil(k_limit / delta_k) # find how many values required to meet limit
-        self.k_extend = np.arange(start=1, stop=N)*delta_k
-        self.k_extend[0] = delta_k/2
-    
+        self.k_extend = np.arange(start=k_limit[0].value, stop=k_limit[1].value, step=delta_k.value) * delta_k.unit
+    '''
     def calc_model_simple(self, k_range):
         # unit check and fix
         if self.beta.unit != (self.surf_unit**2 * self.k_data.unit**(self.alpha-2)):
@@ -497,18 +471,28 @@ class model:
     def calc_bsr(self, rms_sr):
         # unit check and fix
         if hasattr(rms_sr, 'unit'):
-            if rms_sr.unit != self.surf_unit:     
+            if rms_sr.unit != self.surf_unit:  
+                print(rms_sr.unit, self.surf_unit)
                 rms_sr.to(self.surf_unit)
             self.rms_sr = rms_sr
         else:
             raise Exception('surface roughness RMS needs units')
         self.bsr = model_bsr(k_min=self.k_min, k_max=self.k_max, rms_sr=self.rms_sr)
     
-    def calc_model_full(self, L0, lo, k_range):
+    def calc_model_full(self, L0, lo, rms_sr, psd_weight, k_range=None, k_spacing=None, k_limit=None):
+        # set the k-range
+        if k_range is None: # k_range passed in as None defaults to setting k_range
+            if k_spacing is None:
+                raise Exception('Need spatial frequency spacing to build k-space')
+            if k_limit is None:
+                raise Exception('Need upper and lower bound limits for spatial frequency')
+            k_range = set_k_range(k_spacing=k_spacing, k_limit=k_limit)
+        self.k_range = k_range
+        
         # unit check and fix
         if hasattr(L0, 'unit'):
-            if L0.unit != (self.k_radial.unit**-1): 
-                L0.to(self.k_radial.unit**-1)
+            if L0.unit != (self.k_data.unit**-1): 
+                L0.to(self.k_data.unit**-1)
             self.L0 = L0
         else:
             raise Exception('L0 needs units')
@@ -516,14 +500,20 @@ class model:
             raise Exception('lo is unitless, remove the units')
         else:
             self.lo = lo
+        
+        # calculate bsr
+        self.calc_bsr(rms_sr) 
+        
         # verify the PSD units will match with bsr's unit before moving forward
         pmdl_unit_0 = self.beta.unit/(self.L0.unit**-self.alpha)
-        pmdl_unit_1 = self.beta.unit/(self.k_radial.unit**self.alpha)
+        pmdl_unit_1 = self.beta.unit/(self.k_data.unit**self.alpha)
         if (pmdl_unit_0 != self.bsr.unit) or (pmdl_unit_1 != self.bsr.unit):
             raise Exception('PSD units not matching with Beta_sr units, something is wrong somewhere.')
         else: # units matching, move forward
+            self.psd_weight = psd_weight
             psd_parm=[self.alpha, self.beta, self.L0, self.lo, self.bsr]
             self.psd_full=model_full(k=k_range, psd_parm=psd_parm)
+            self.psd_full_scaled = self.psd_full * psd_weight
         
     def calc_beta(self, alpha, rms_surf):
         # unit check and fix
@@ -536,7 +526,7 @@ class model:
         self.beta_calc = model_beta(k_min=self.k_min, k_max=self.k_max,
                                     alpha=alpha, rms_surf=rms_surf)
 
-# Support functions for the model class
+# Support functions inside the model class
 def model_beta(k_min, k_max, alpha, rms_surf):
     if alpha==2:
         beta = (rms_surf**2) / (2*np.pi*np.log(k_max/k_min))
@@ -576,6 +566,134 @@ def model_full(k, psd_parm):
     if inf_coord.shape[0]>0:
         pk[inf_coord.tolist()[0][0]][inf_coord.tolist()[0][1]] = 0*pk.unit
     return pk # will have units
+
+###########################################
+# MODEL APPLICATION
+
+class model_combine:
+    def __init__(self, mdl_set, avg_psd):
+        psd_parm = []
+        psd_weight = []
+        mdl_sum = np.zeros_like(mdl_set[0].psd_full.value)
+        for j in range(0, len(mdl_set)):
+            parameters = [mdl_set[j].alpha, mdl_set[j].beta, mdl_set[j].L0, mdl_set[j].lo, mdl_set[j].bsr]
+            psd_parm.append(parameters)
+            psd_weight.append(mdl_set[j].psd_weight)
+            mdl_sum = mdl_sum + mdl_set[j].psd_full_scaled.value
+        self.psd_parm = psd_parm
+        self.psd_weight = psd_weight
+        self.psd_radial_sum = mdl_sum * mdl_set[0].psd_full.unit
+        self.k_range = mdl_set[0].k_range
+        
+        # collect data from the average PSD object
+        self.delta_k = avg_psd.delta_k
+        self.npix_diam = avg_psd.npix_diam
+        self.k_min = avg_psd.k_min
+        self.k_max = avg_psd.k_max
+        self.data_k_radial = avg_psd.k_radial
+        self.data_psd_radial = avg_psd.psd_radial_cal
+        
+    def calc_error(self):
+        mdl_comp = np.zeros_like(self.data_k_radial.value)
+        percent_error = np.zeros_like(self.data_k_radial.value)
+        percent_error_log = np.zeros_like(self.data_k_radial.value)
+        for nk in range(0, len(self.data_k_radial)):
+            for nmdl in range(0, len(self.psd_weight)):
+                nmdl_psd = model_full(k=self.data_k_radial[nk], psd_parm=self.psd_parm[nmdl]).value * self.psd_weight[nmdl]
+                mdl_comp[nk] = mdl_comp[nk] + nmdl_psd
+            psd_comp = self.data_psd_radial[nk].value
+            percent_error[nk] = 100 * (mdl_comp[nk] - psd_comp) / psd_comp
+            percent_error_log[nk] = 100 * (np.log10(mdl_comp[nk]) - np.log10(psd_comp)) / np.log10(psd_comp)
+        self.percent_error = percent_error
+        self.percent_error_log = percent_error_log
+        
+    def calc_psd_rms(self):
+        # build the k-map
+        cen = int(self.npix_diam/2)
+        if self.npix_diam%2 == 0:
+            ky, kx = np.ogrid[-cen:cen, -cen:cen]
+        else:
+            ky, kx = np.ogrid[-cen:cen+1, -cen:cen+1]
+        ky = ky*self.delta_k
+        kx = kx*self.delta_k
+        k_map = np.sqrt(kx**2 + ky**2)
+        
+        # calculate the PSD
+        psd_mdl = np.zeros_like(k_map.value)
+        for n in range(0, len(self.psd_weight)):
+            psd_mdl = psd_mdl + (model_full(k=k_map, psd_parm=self.psd_parm[n]).value*self.psd_weight[n])
+        self.psd_sum = psd_mdl * self.psd_radial_sum.unit
+        
+        # with the PSD calculated, do the RMS
+        k_tgt_lim = [self.k_min, self.k_max]
+        self.psd_rms = do_psd_rms(psd_data=self.psd_sum, delta_k=self.delta_k, 
+                                  k_tgt_lim=k_tgt_lim, print_rms=False, print_kloc=False)
+            
+            
+def apply_model(i_start, i_end, lo, L0, rms_sr, psd_weight, avg_psd, opt_parms):
+    # model each region
+    mdl_set = []
+    k_limit = [np.amin(avg_psd.k_radial)/10, np.amax(avg_psd.k_radial)*10]
+    for j in range(0, len(i_start)):
+        mdl = model(region_num=j)
+        mdl.load_parm(ind_range=[i_start[j],i_end[j]], psd_obj=avg_psd)
+        mdl.solve_lsf()
+        mdl.calc_model_full(L0=L0[j], lo=lo[j], rms_sr=rms_sr[j], psd_weight=psd_weight[j], 
+                            k_spacing=opt_parms['dk']*0.2, k_limit=k_limit)
+        mdl_set.append(mdl)
+        
+    # apply the addition, percent error, rms
+    model_sum = model_combine(mdl_set=mdl_set, avg_psd=avg_psd)
+    model_sum.calc_error()
+    model_sum.calc_psd_rms()
+    
+    return mdl_set, model_sum
+
+def plot_model(mdl_set, model_sum, avg_psd, opt_parms):
+    k_radial = avg_psd.k_radial.value
+    psd_radial = avg_psd.psd_radial_cal.value
+    k_range_mdl = model_sum.k_range.value
+    
+    color_list=['r', 'b','y', 'g']
+    anno_opts = dict(xy=(0.1, .9), xycoords='axes fraction',
+                     va='center', ha='center')
+
+    plt.figure(figsize=[14,9],dpi=100)
+    gs = gridspec.GridSpec(ncols=1, nrows=2, height_ratios=[4,2])
+    ax0 = plt.subplot(gs[0])  
+    ax0.loglog(k_radial, psd_radial, 'k', linewidth=3, label='Avg PSD (PTT, all steps)\nRMS={0:.3f}'.format(avg_psd.rms_tot))
+    for j in range(0, len(mdl_set)):
+        plt_label = '{0}: {1}={2:.3f}, {3}={4:.5f}\n'.format(r'$r_{0}$'.format(mdl_set[j].region_num),
+                                                             r'$\alpha$', mdl_set[j].alpha, 
+                                                             r'$\beta$', mdl_set[j].beta.value)
+        plt_label = plt_label + '{0}={1:.1f}, {2}={3:.2f}, {4}={5:.1e}A\n'.format(r'$L_{0}$',mdl_set[j].L0, 
+                                                                                   r'$l_{0}$', mdl_set[j].lo, 
+                                                                                   r'$\sigma_{sr}$', mdl_set[j].rms_sr.to(u.angstrom).value)
+        plt_label = plt_label + '{0}={1:.2f}'.format(r'$a_{0}$'.format(j), mdl_set[j].psd_weight)
+        ax0.loglog(mdl_set[j].k_range.value, mdl_set[j].psd_full_scaled.value, color_list[j]+':', linewidth=1.5,
+                   label=plt_label)
+        # draw in the color box
+        ax0.axvspan(k_radial[mdl_set[j].i_start], k_radial[mdl_set[j].i_end], facecolor=color_list[j], alpha=0.1)
+    mdl_sum_text = 'model sum {0}\nRMS={1:.3f}'.format(r'$\Sigma a_{n}r_{n}$', model_sum.psd_rms)
+    ax0.loglog(model_sum.k_range.value, model_sum.psd_radial_sum.value, linewidth=2.5, label=mdl_sum_text)
+    ax0.set_xlim(left=np.amin(k_range_mdl)*0.8, right=np.amax(k_range_mdl)*1.2)
+    ax0.set_ylim(bottom=1e-5)
+    ax0.set_ylabel('PSD ({0})'.format(mdl_set[0].psd_full.unit))
+    ax0.legend(prop={'size':8})#,loc='center left', bbox_to_anchor=(1, 0.5))
+    ax0.set_title('MagAO-X PSD modeling (PRELIMINARY VISUAL): fm {0}, {1}% CA'.format(opt_parms['label'], opt_parms['ca']))
+    
+    avg_err = np.mean(np.abs(model_sum.percent_error_log))
+    rms_ratio = (model_sum.psd_rms/avg_psd.rms_tot)*100
+    ax1 = plt.subplot(gs[1])
+    ax1.semilogx(k_radial, model_sum.percent_error_log)
+    ax1.hlines(y=0, xmin=np.amin(k_range_mdl)*0.8, xmax=np.amax(k_range_mdl)*1.2, color='k')
+    ax1.set_ylim(top=100, bottom=-100)
+    ax1.set_xlim(left=np.amin(k_range_mdl)*0.8, right=np.amax(k_range_mdl)*1.2)
+    ax1.set_ylabel('Percent error')
+    ax1.set_xlabel('Spatial Frequency [{0}]'.format(mdl_set[0].k_range.unit))
+    ax1.annotate('Mean abs error %: {0:.4}%\nRMS ratio: {1:.3f}%'.format(avg_err, rms_ratio), **anno_opts)
+
+    plt.tight_layout()
 
 ###########################################
 # BUILD SURFACE
@@ -806,106 +924,83 @@ def getSampSide(optic_data):
     
     return samp
 
-def do_psd_radial(ring_width, psd_data, dk, kmin):
-    # generic version of code if inputting a different ring width and PSD data set
-    # make grid for average radial power value
-    if hasattr(psd_data, 'unit'):
-        psd_data = psd_data.value
-    side = np.shape(psd_data)[0]
-    shift = int(side/2)
-    radial_freq = np.linspace((-shift*dk), (shift*dk), side, endpoint=False)
-    radial_freq = radial_freq[shift:side] # only pick the right side for content
-    #shift = np.int(self.oversamp/2)
-    if side%2 != 0:
-        maskY, maskX = np.ogrid[-shift:shift+1, -shift:shift+1]
-    else:
-        maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
-        
-    # set up ring parameters
-    if ring_width % 2 == 0:
-        ring_width += 1 # increase by 1 to make it odd
-    r_halfside = np.int((ring_width-1)/2)
-    r = 1
+def set_k_range(k_spacing, k_limit):
+    # custom setting spatial frequency range
+    k_extend = np.arange(start=k_limit[0].value, stop=k_limit[1].value, step=k_spacing.value)
+    return k_extend * k_spacing.unit
 
-    # initialize content
-    mean_bin = [] # initialize empty list of mean PSD values
-    k_val = [] # initialize empty list of spatial frequencies
-    
-    # chug along through the radial frequency values
-    while((r+r_halfside)<shift): # while inside the region of inteest
-        ri = r - r_halfside # inner radius of ring
-        if radial_freq[r].value <= kmin.value: # verify that position r is at the low limit
-            #print('test k-value too small, iterate to next')
-            r+=1
-        else:
-            if ri > 0:
-                radial_mask = psd.makeRingMask(maskY, maskX, ri, ring_width)
-                radial_bin = psd.makeRingMaskBin(psd_data,radial_mask)
-                mean_bin.append(np.mean(radial_bin))
-                k_val.append(radial_freq[r].value)
-            r+=ring_width # iterate to the next r value in the loop
-
-    k_radial = k_val * radial_freq.unit
-    psd_radial = mean_bin #* psd_data.unit
-
-    return (k_radial, psd_radial)
-
-def new_psd_radial(psd_data, radial_freq):
+def do_psd_radial(psd_data, delta_k, ring_width=3):
     # a different version for less frills.
+    # formerly new_psd_radial
     if hasattr(psd_data, 'unit'):
+        psd_unit = psd_data.unit
         psd_data = psd_data.value
-    side = np.shape(psd_data)[0]
-    shift = int(side/2)
-    if side%2 != 0:
-        maskY, maskX = np.ogrid[-shift:shift+1, -shift:shift+1]
     else:
-        maskY, maskX = np.ogrid[-shift:shift, -shift:shift]
+        raise Exception('PSD missing units')
+    
+    if hasattr(delta_k, 'unit'):
+        delta_k_unit = delta_k.unit
+        delta_k = delta_k.value
+    else:
+        raise Exception('Radial frequency scale missing units')
+    
+    if ring_width % 2 != 0: # must be odd
+        ring_side = int((ring_width-1)/2)
+    else: # even width, not okay
+        raise Exception('Ring width needs to be odd for symmetric fit')
+    
+    side = np.shape(psd_data)[0]
+    cen = int(side/2)
+    if side%2 == 0:
+        my, mx = np.ogrid[-cen:cen, -cen:cen]
+    else:
+        my, mx = np.ogrid[-cen:cen+1, -cen:cen+1]
+    radial_freq = mx[0][cen:side]*delta_k
 
     # initialize content
     mean_bin = [] # initialize empty list of mean PSD values
     k_val = [] # initialize empty list of spatial frequencies
     
-    for test_radius in range(1, shift):
-        ring_mask_in = maskX**2 + maskY**2 <= (test_radius-1)**2
-        ring_mask_out = maskX**2 + maskY**2 <= (test_radius+1)**2
-        ring_mask = ring_mask_out ^ ring_mask_in
+    for test_radius in range(ring_side, cen): # starting at ring_side provides minimum distance for calculation
+        ring_mask_in = mx**2 + my**2 <= (test_radius-ring_side)**2
+        ring_mask_out = mx**2 + my**2 <= (test_radius+ring_side)**2
+        ring_mask = ring_mask_out ^ ring_mask_in #XOR statement
         ring_bin = np.extract(ring_mask, psd_data)
         mean_bin.append(np.mean(ring_bin))
         k_val.append(radial_freq[test_radius])
 
-    k_radial = k_val
-    psd_radial = mean_bin #* psd_data.unit
+    k_radial = np.asarray(k_val)*delta_k_unit
+    psd_radial = mean_bin * psd_unit #* psd_data.unit
 
-    return (k_radial, psd_radial)
+    return (k_radial, psd_radial) # both should hold units
 
-def makeRingMask(y,x,inner_r,r_width):
-    '''
-    Makes radial median mask... that looks like a ring.
-    Input:
-    y        - meshgrid vertical values (pixel count units)
-    x        - meshgrid horizontal values (pixel count units)
-    inner_r  - inner radial value (pixel count units)
-    dr       - ring thickness (pixel count units)
-    Output:
-    ringMask - ring mask (boolean type)
-    '''
-    inside_mask = x**2+y**2 <= inner_r**2
-    outside_mask = x**2+y**2 <= (inner_r+r_width)**2
-    ringMask = outside_mask ^ inside_mask # use xor, such that so long as one is true then it will make ring.
-    return ringMask
+def do_psd_rms(psd_data, delta_k, k_tgt_lim, print_rms=False, print_kloc=False):   
+    # create the grid
+    side = np.shape(psd_data)[0]
+    cen = int(side/2)
+    if side%2 == 0:
+        my, mx = np.ogrid[-cen:cen, -cen:cen]
+    else:
+        my, mx = np.ogrid[-cen:cen+1, -cen:cen+1]
+    radial_freq = mx[0][cen:side]*delta_k
     
-def makeRingMaskBin(power_data, ringMask):
-    '''
-    Returns bin values of the ring mask
-    Input:
-    data        - wavefront power data, must be square matrix
-    ringmask    - ring mask, must be same size as data and boolean type
-    Output:
-    ringmaskbin - vector of values passed through mask
-    '''
-    ringMaskBin = np.extract(ringMask, power_data)
-    ringbin = ringMaskBin[~np.isnan(ringMaskBin)]
-    return ringbin
+    # find the locations for k_low and k_high:
+    (bin_low, k_low) = k_locate(radial_freq, k_tgt_lim[0], print_change=print_kloc)
+    (bin_high, k_high) = k_locate(radial_freq, k_tgt_lim[1], print_change=print_kloc)
+    rms_width = bin_high - bin_low
+    
+    # make the mask
+    ring_mask_in = mx**2 + my**2 <= bin_low**2
+    ring_mask_out = mx**2 + my**2 <= bin_high**2
+    ring_mask = ring_mask_out ^ ring_mask_in #XOR statement
+    ring_bin = np.extract(ring_mask, psd_data) #* psd_data.unit
+    
+    # calculate the rms
+    rms_val = np.sqrt(np.sum(ring_bin * (delta_k**2))) # should have units
+    if print_rms==True:
+        print('Target range - k_low: {0:.3f} and k_high: {1:.3f}'.format(k_low, k_high))
+        print('RMS value: {0:.4f}'.format(rms_val))
+    return rms_val
 
 def k_locate(freqrange, k_tgt, print_change=False):
     # given a target spatial frequency, find the index bin and value closest to target.
