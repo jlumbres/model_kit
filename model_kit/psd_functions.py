@@ -10,10 +10,12 @@ This modular function file has the following goals:
 import numpy as np
 import copy
 from scipy import interpolate
+from scipy.optimize import least_squares
 from datetime import datetime
 import os
 from matplotlib import gridspec
 import matplotlib.pyplot as plt
+
 
 # for calling in data
 from astropy.io import fits
@@ -37,7 +39,6 @@ class surfPSD:
         # to use if opening the data from a FITS file
         # assumes the data is efficiently filled (no zero col/row)
         self.data = (fits.open(fileloc)[0].data*surf_units) # units from Zgyo analysis
-        # unload data from header
         hdr = fits.open(fileloc)[0].header
         self.wavelen = hdr['WAVELEN'] * u.m
         self.latres = hdr['LATRES'] * u.m / u.pix
@@ -86,17 +87,12 @@ class surfPSD:
             self.psd_cal = psd_fits.data * (self.diam_ca.unit**2) * (var_unit**2)
             
     def load_psd(self, psd_data, psd_type, var=None):
-        #if var is not None and hasattr(var, 'unit'):
-        #    self.var = var
-        #else:
-        #    raise Exception('Variance pass in needs units')
         if hasattr(psd_data, 'unit'):
             if psd_type=='norm':
                 self.psd_norm=psd_data
                 self.psd_cal = self.psd_norm * var 
             elif psd_type=='cal':
                 self.psd_cal=psd_data
-                #self.psd_norm = self.psd_cal / var
             elif psd_type=='raw':
                 self.psd_raw=psd_raw
             else:
@@ -121,14 +117,6 @@ class surfPSD:
             self.delta_k = delta_k
         else:
             self.delta_k = 1/(self.oversamp*self.diam_ca/self.npix_diam)
-        
-        # Set full radial frequency range
-        '''
-        # Not necessary anymore with code edits
-        samp_space = self.diam_ca / self.npix_diam
-        ft_freq = np.fft.fftfreq(n=self.oversamp, d=samp_space)
-        self.radialFreq = ft_freq[0:np.int(self.oversamp/2)] # not necessary anymore?
-        '''
         
     def calc_psd(self, oversamp, kmid_ll = 0.1/u.mm, khigh_ll=1/u.mm, var_unit = u.nm):
         self.oversamp = oversamp
@@ -172,10 +160,7 @@ class surfPSD:
                                'constant', constant_values=0)
         assert (np.shape(optic_ovs)[0] == self.oversamp), "Padding does not match desired oversample size"
         
-        #optic_ovs = np.pad(hannWin, pad_side, pad_with)
-        #if optic_ovs.shape[0] != self.oversamp: # I hope this doesn't break things
-        #    self.oversamp = optic_ovs.shape[0]
-        FT_wf = np.fft.fftshift(np.fft.fft2(optic_ovs))*self.data.unit # this comes out unitless, reapply
+        FT_wf = np.fft.fftshift(np.fft.fft2(optic_ovs))*self.data.unit # FT is unitless
         self.psd_raw = np.real(FT_wf*np.conjugate(FT_wf))#/(self.data.unit**2)
         # psd_raw should be in units of [data]**2
         
@@ -214,8 +199,6 @@ class surfPSD:
     
     def calc_psd_radial(self, ring_width):
         # shortcut version for basic code analysis
-        #(self.k_radial, self.psd_radial_cal) = self.do_psd_radial(ring_width=ring_width,
-        #                                                          psd_data = self.psd_cal)
         (self.k_radial, self.psd_radial_cal) = do_psd_radial(psd_data=self.psd_cal, delta_k=self.delta_k, ring_width=ring_width)
     
     def calc_rms_set(self, kmid_ll, khigh_ll, pwr_opt, print_rms=False, print_kloc=False):
@@ -253,8 +236,7 @@ class surfPSD:
             write_data = np.single(psd_data.value)
         else:
             write_data = psd_data.value
-        
-        # Write to FITS file
+            
         fits.writeto(filename, write_data, hdr, overwrite=True)
 
 ##########################################
@@ -403,12 +385,11 @@ radial_k        - 1/mm (spatial frequency)
 radial_psd      - mm^2 nm^2 (1/spatial frequency ^2 * variance = mm^2 nm^2)
 bsr        - mm^2 nm^2 (same units as psd)
 '''
-class model(surfPSD):
-    #def __init__(self, region_num, ind_start, ind_end, k_radial, p_radial, k_min, k_max):
+class model_single(surfPSD):
     def __init__(self, region_num):#, ind_start, ind_end, surfPSD):
         self.region_num = region_num
     
-    def set_parm(self, ind_range, k_radial, p_radial, k_min, k_max):
+    def set_data(self, ind_range, k_radial, p_radial, k_min, k_max):
         if hasattr(k_radial, 'unit') and hasattr(p_radial, 'unit'):
             self.k_radial = k_radial
             self.p_radial = p_radial
@@ -433,44 +414,30 @@ class model(surfPSD):
         else:
             raise Exception('k_max needs units and preferably should match with k_radial')
     
-    def load_parm(self, ind_range, psd_obj=None):
+    def load_data(self, ind_range, psd_obj=None):
         self.i_start = ind_range[0]
         self.i_end = ind_range[1]
         if psd_obj is not None: # passed in a separate object
-            self.k_data = psd_obj.k_radial[ind_range[0]:ind_range[1]+1]
-            self.p_data = psd_obj.psd_radial_cal[ind_range[0]:ind_range[1]+1]
+            self.k_data = psd_obj.k_radial[ind_range[0]:ind_range[1]]
+            self.p_data = psd_obj.psd_radial_cal[ind_range[0]:ind_range[1]]
             self.k_min = psd_obj.k_min
             self.k_max = psd_obj.k_max
         else: # surfPSD methods were used and was calculated
-            self.k_data = self.k_radial[ind_range[0]:ind_range[1]+1]
-            self.p_data = self.psd_radial_cal[ind_range[0]:ind_range[1]+1]
+            self.k_data = self.k_radial[ind_range[0]:ind_range[1]]
+            self.p_data = self.psd_radial_cal[ind_range[0]:ind_range[1]]
             # self.k_min and self.k_max not needed because pre-existing
         self.surf_unit = (self.p_data.unit*(self.k_data.unit**2))**(0.5) # sqrt alternative
-    
-    def solve_lsf(self):      
-        # linearized equation from PSD in form y = mx + c
-        y = np.log10(self.p_data.value)
-        x = np.log10(self.k_data.value)
-        # linear least square fit
-        A = np.vstack([x, np.ones(len(x))]).T
-        m,c = np.linalg.lstsq(A, y)[0] # y = mx + c linear equation
-        self.alpha = -1*m # unitless naturally
-        self.beta = 10**(c) * (self.surf_unit**2) / (self.k_data.unit**(-self.alpha+2))
-    '''
-    def extend_k(self, delta_k, k_limit):
-        # Expand spatial freq range to see where the model takes us with the data
-        self.k_extend = np.arange(start=k_limit[0].value, stop=k_limit[1].value, step=delta_k.value) * delta_k.unit
-    '''
-    def calc_model_simple(self, k_range):
-        # unit check and fix
-        if self.beta.unit != (self.surf_unit**2 * self.k_data.unit**(self.alpha-2)):
-            raise Exception('beta units do not match with surface units, k-space units, and alpha.')
-        self.psd_simple = model_full(k=k_range, psd_parm=[self.alpha, self.beta, 0.0/self.k_data.unit,
-                                                           0.0, 0.0*self.p_data.unit]) # units safe
-    
-    def calc_bsr(self, rms_sr):
-        # unit check and fix
-        if hasattr(rms_sr, 'unit'):
+        
+    def load_psd_parm(self, psd_parm_list):
+        self.alpha = psd_parm_list[0]
+        self.beta = psd_parm_list[1]
+        self.L0 = psd_parm_list[2]
+        self.lo = psd_parm_list[3]
+        self.bsr = psd_parm_list[4]
+        
+    def calc_psd_parm(self, rms_sr, x0=[1.0, 1.0, 1.0, 1.0]):
+        # calculate the surface roughness value
+        if hasattr(rms_sr, 'unit'): # unit check and fix
             if rms_sr.unit != self.surf_unit:  
                 print(rms_sr.unit, self.surf_unit)
                 rms_sr.to(self.surf_unit)
@@ -478,8 +445,17 @@ class model(surfPSD):
         else:
             raise Exception('surface roughness RMS needs units')
         self.bsr = model_bsr(k_min=self.k_min, k_max=self.k_max, rms_sr=self.rms_sr)
-    
-    def calc_model_full(self, L0, lo, rms_sr, psd_weight, k_range=None, k_spacing=None, k_limit=None):
+        
+        # calculate the rest of the variables
+        # x0 are guessing values for non-linear lsq, they can be anything.
+        res_lsq = least_squares(fit_func, x0, args=(self.k_data.value, self.p_data.value))
+        
+        self.alpha = res_lsq.x[0]
+        self.beta = res_lsq.x[1] * (self.surf_unit**2) / (self.k_data.unit**(-self.alpha+2))
+        self.L0 = res_lsq.x[2]/self.k_data.unit
+        self.lo = res_lsq.x[3]
+        
+    def calc_model_total(self, psd_weight=1.0, k_range=None, k_spacing=None, k_limit=None):
         # set the k-range
         if k_range is None: # k_range passed in as None defaults to setting k_range
             if k_spacing is None:
@@ -488,21 +464,6 @@ class model(surfPSD):
                 raise Exception('Need upper and lower bound limits for spatial frequency')
             k_range = set_k_range(k_spacing=k_spacing, k_limit=k_limit)
         self.k_range = k_range
-        
-        # unit check and fix
-        if hasattr(L0, 'unit'):
-            if L0.unit != (self.k_data.unit**-1): 
-                L0.to(self.k_data.unit**-1)
-            self.L0 = L0
-        else:
-            raise Exception('L0 needs units')
-        if hasattr(lo, 'unit'):
-            raise Exception('lo is unitless, remove the units')
-        else:
-            self.lo = lo
-        
-        # calculate bsr
-        self.calc_bsr(rms_sr) 
         
         # verify the PSD units will match with bsr's unit before moving forward
         pmdl_unit_0 = self.beta.unit/(self.L0.unit**-self.alpha)
@@ -514,7 +475,7 @@ class model(surfPSD):
             psd_parm=[self.alpha, self.beta, self.L0, self.lo, self.bsr]
             self.psd_full=model_full(k=k_range, psd_parm=psd_parm)
             self.psd_full_scaled = self.psd_full * psd_weight
-        
+    
     def calc_beta(self, alpha, rms_surf):
         # unit check and fix
         if hasattr(rms_surf, 'unit'):
@@ -526,7 +487,29 @@ class model(surfPSD):
         self.beta_calc = model_beta(k_min=self.k_min, k_max=self.k_max,
                                     alpha=alpha, rms_surf=rms_surf)
 
-# Support functions inside the model class
+# Supporting functions inside the model class
+def psd_fitter(x, k):
+    # x: parameters to fit
+    # k: spatial frequency values
+    n_prm = 4 # THERE ARE FOUR LIGHTS -Captain Jean-Luc Picard
+    n_psd = int(len(x)/n_prm)
+    for j in range(0, n_psd):
+        i_offset = int(j*n_prm)
+        denom = ( ((1/x[2+i_offset])**2) + (k**2))**(x[0+i_offset]/2)
+        if j== 0:
+            pk = (x[1+i_offset]/denom)*np.exp(-((k*x[3+i_offset])**2))
+        else:
+            pk = pk + (x[1+i_offset]/denom)*np.exp(-((k*x[3+i_offset])**2))
+    return pk
+
+def fit_func(x, k, y):
+    # y: values to fit against
+    pk = psd_fitter(x,k)
+    return pk-y
+
+def fit_func_ratio(x, k, y):
+    return fit_func(x,k,y)/y
+
 def model_beta(k_min, k_max, alpha, rms_surf):
     if alpha==2:
         beta = (rms_surf**2) / (2*np.pi*np.log(k_max/k_min))
@@ -572,40 +555,63 @@ def model_full(k, psd_parm):
 
 class model_combine:
     def __init__(self, mdl_set, avg_psd):
-        psd_parm = []
-        psd_weight = []
-        mdl_sum = np.zeros_like(mdl_set[0].psd_full.value)
-        for j in range(0, len(mdl_set)):
-            parameters = [mdl_set[j].alpha, mdl_set[j].beta, mdl_set[j].L0, mdl_set[j].lo, mdl_set[j].bsr]
-            psd_parm.append(parameters)
-            psd_weight.append(mdl_set[j].psd_weight)
-            mdl_sum = mdl_sum + mdl_set[j].psd_full_scaled.value
-        self.psd_parm = psd_parm
-        self.psd_weight = psd_weight
-        self.psd_radial_sum = mdl_sum * mdl_set[0].psd_full.unit
-        self.k_range = mdl_set[0].k_range
-        
         # collect data from the average PSD object
         self.delta_k = avg_psd.delta_k
         self.npix_diam = avg_psd.npix_diam
         self.k_min = avg_psd.k_min
         self.k_max = avg_psd.k_max
-        self.data_k_radial = avg_psd.k_radial
-        self.data_psd_radial = avg_psd.psd_radial_cal
+        self.k_radial_data = avg_psd.k_radial
+        self.psd_radial_data = avg_psd.psd_radial_cal
+        
+        # collect data from the single PSD models
+        psd_parm = []
+        psd_weight = []
+        sum_mdl = np.zeros_like(mdl_set[0].psd_full.value)
+        sum_mdl_data = np.zeros_like(self.psd_radial_data.value)
+        for j in range(0, len(mdl_set)):
+            parameters = [mdl_set[j].alpha, mdl_set[j].beta, mdl_set[j].L0, mdl_set[j].lo, mdl_set[j].bsr]
+            psd_parm.append(parameters)
+            psd_weight.append(mdl_set[j].psd_weight)
+            sum_mdl = sum_mdl + mdl_set[j].psd_full_scaled.value
+            sum_mdl_data = sum_mdl_data + model_full(k=self.k_radial_data, psd_parm=parameters).value
+        self.psd_parm = psd_parm
+        self.psd_weight = psd_weight
+        self.psd_radial_sum = sum_mdl * mdl_set[0].psd_full.unit
+        self.psd_radial_sum_data = sum_mdl_data * mdl_set[0].psd_full.unit # should have same units
+        self.k_radial_model = mdl_set[0].k_range
+        self.surf_unit = mdl_set[0].surf_unit
+        
+    def calc_refit(self):
+        x0 = []
+        n_psd = len(self.psd_parm)
+        for j in range(0, n_psd):
+            x0.append(self.psd_parm[j][0])
+            x0.append(self.psd_parm[j][1].value)
+            x0.append(self.psd_parm[j][2].value)
+            x0.append(self.psd_parm[j][3])
+        full_lsq = least_squares(fit_func_ratio, x0, args=(self.k_radial_data.value, self.psd_radial_data.value))
+        
+        # reset the psd parameters and the total PSD sums
+        new_parm = []
+        mdl_sum = np.zeros_like(self.psd_radial_sum.value)
+        mdl_sum_data = np.zeros_like(self.psd_radial_data.value)
+        for j in range(0, n_psd):
+            i_offset = int(j*4)
+            a = full_lsq.x[0+i_offset]
+            b = full_lsq.x[1+i_offset] * (self.surf_unit**2) / (self.k_radial_data.unit**(-a+2))
+            os = full_lsq.x[2+i_offset]/self.k_radial_data.unit
+            ins = full_lsq.x[3+i_offset]
+            parm = [a, b, os, ins, self.psd_parm[j][4]]
+            new_parm.append(parm)
+            new_mdl = model_full(k=self.k_radial_model, psd_parm=parm)
+            mdl_sum = mdl_sum + (new_mdl.value * self.psd_weight[j])
+            mdl_sum_data = mdl_sum_data + (model_full(k=self.k_radial_data, psd_parm=parm).value * self.psd_weight[j])
+        self.psd_parm = new_parm
+        self.psd_radial_sum = mdl_sum * new_mdl.unit
+        self.psd_radial_sum_data = mdl_sum_data * new_mdl.unit
         
     def calc_error(self):
-        mdl_comp = np.zeros_like(self.data_k_radial.value)
-        percent_error = np.zeros_like(self.data_k_radial.value)
-        percent_error_log = np.zeros_like(self.data_k_radial.value)
-        for nk in range(0, len(self.data_k_radial)):
-            for nmdl in range(0, len(self.psd_weight)):
-                nmdl_psd = model_full(k=self.data_k_radial[nk], psd_parm=self.psd_parm[nmdl]).value * self.psd_weight[nmdl]
-                mdl_comp[nk] = mdl_comp[nk] + nmdl_psd
-            psd_comp = self.data_psd_radial[nk].value
-            percent_error[nk] = 100 * (mdl_comp[nk] - psd_comp) / psd_comp
-            percent_error_log[nk] = 100 * (np.log10(mdl_comp[nk]) - np.log10(psd_comp)) / np.log10(psd_comp)
-        self.percent_error = percent_error
-        self.percent_error_log = percent_error_log
+        self.error = np.log10(self.psd_radial_sum_data.value/self.psd_radial_data.value)
         
     def calc_psd_rms(self):
         # build the k-map
@@ -618,82 +624,16 @@ class model_combine:
         kx = kx*self.delta_k
         k_map = np.sqrt(kx**2 + ky**2)
         
-        # calculate the PSD
+        # calculate the 2D PSD
         psd_mdl = np.zeros_like(k_map.value)
         for n in range(0, len(self.psd_weight)):
-            psd_mdl = psd_mdl + (model_full(k=k_map, psd_parm=self.psd_parm[n]).value*self.psd_weight[n])
-        self.psd_sum = psd_mdl * self.psd_radial_sum.unit
+            psd_mdl = psd_mdl + (model_full(k=k_map, psd_parm=self.psd_parm[n]).value * self.psd_weight[n])
+        psd_2D = psd_mdl * self.psd_radial_sum.unit
         
         # with the PSD calculated, do the RMS
         k_tgt_lim = [self.k_min, self.k_max]
-        self.psd_rms = do_psd_rms(psd_data=self.psd_sum, delta_k=self.delta_k, 
+        self.psd_rms_sum = do_psd_rms(psd_data=psd_2D, delta_k=self.delta_k, 
                                   k_tgt_lim=k_tgt_lim, print_rms=False, print_kloc=False)
-            
-            
-def apply_model(i_start, i_end, lo, L0, rms_sr, psd_weight, avg_psd, opt_parms):
-    # model each region
-    mdl_set = []
-    k_limit = [np.amin(avg_psd.k_radial)/10, np.amax(avg_psd.k_radial)*10]
-    for j in range(0, len(i_start)):
-        mdl = model(region_num=j)
-        mdl.load_parm(ind_range=[i_start[j],i_end[j]], psd_obj=avg_psd)
-        mdl.solve_lsf()
-        mdl.calc_model_full(L0=L0[j], lo=lo[j], rms_sr=rms_sr[j], psd_weight=psd_weight[j], 
-                            k_spacing=opt_parms['dk']*0.2, k_limit=k_limit)
-        mdl_set.append(mdl)
-        
-    # apply the addition, percent error, rms
-    model_sum = model_combine(mdl_set=mdl_set, avg_psd=avg_psd)
-    model_sum.calc_error()
-    model_sum.calc_psd_rms()
-    
-    return mdl_set, model_sum
-
-def plot_model(mdl_set, model_sum, avg_psd, opt_parms):
-    k_radial = avg_psd.k_radial.value
-    psd_radial = avg_psd.psd_radial_cal.value
-    k_range_mdl = model_sum.k_range.value
-    
-    color_list=['r', 'b','y', 'g']
-    anno_opts = dict(xy=(0.1, .9), xycoords='axes fraction',
-                     va='center', ha='center')
-
-    plt.figure(figsize=[14,9],dpi=100)
-    gs = gridspec.GridSpec(ncols=1, nrows=2, height_ratios=[4,2])
-    ax0 = plt.subplot(gs[0])  
-    ax0.loglog(k_radial, psd_radial, 'k', linewidth=3, label='Avg PSD (PTT, all steps)\nRMS={0:.3f}'.format(avg_psd.rms_tot))
-    for j in range(0, len(mdl_set)):
-        plt_label = '{0}: {1}={2:.3f}, {3}={4:.5f}\n'.format(r'$r_{0}$'.format(mdl_set[j].region_num),
-                                                             r'$\alpha$', mdl_set[j].alpha, 
-                                                             r'$\beta$', mdl_set[j].beta.value)
-        plt_label = plt_label + '{0}={1:.1f}, {2}={3:.2f}, {4}={5:.1e}A\n'.format(r'$L_{0}$',mdl_set[j].L0, 
-                                                                                   r'$l_{0}$', mdl_set[j].lo, 
-                                                                                   r'$\sigma_{sr}$', mdl_set[j].rms_sr.to(u.angstrom).value)
-        plt_label = plt_label + '{0}={1:.2f}'.format(r'$a_{0}$'.format(j), mdl_set[j].psd_weight)
-        ax0.loglog(mdl_set[j].k_range.value, mdl_set[j].psd_full_scaled.value, color_list[j]+':', linewidth=1.5,
-                   label=plt_label)
-        # draw in the color box
-        ax0.axvspan(k_radial[mdl_set[j].i_start], k_radial[mdl_set[j].i_end], facecolor=color_list[j], alpha=0.1)
-    mdl_sum_text = 'model sum {0}\nRMS={1:.3f}'.format(r'$\Sigma a_{n}r_{n}$', model_sum.psd_rms)
-    ax0.loglog(model_sum.k_range.value, model_sum.psd_radial_sum.value, linewidth=2.5, label=mdl_sum_text)
-    ax0.set_xlim(left=np.amin(k_range_mdl)*0.8, right=np.amax(k_range_mdl)*1.2)
-    ax0.set_ylim(bottom=1e-5)
-    ax0.set_ylabel('PSD ({0})'.format(mdl_set[0].psd_full.unit))
-    ax0.legend(prop={'size':8})#,loc='center left', bbox_to_anchor=(1, 0.5))
-    ax0.set_title('MagAO-X PSD modeling (PRELIMINARY VISUAL): fm {0}, {1}% CA'.format(opt_parms['label'], opt_parms['ca']))
-    
-    avg_err = np.mean(np.abs(model_sum.percent_error_log))
-    rms_ratio = (model_sum.psd_rms/avg_psd.rms_tot)*100
-    ax1 = plt.subplot(gs[1])
-    ax1.semilogx(k_radial, model_sum.percent_error_log)
-    ax1.hlines(y=0, xmin=np.amin(k_range_mdl)*0.8, xmax=np.amax(k_range_mdl)*1.2, color='k')
-    ax1.set_ylim(top=100, bottom=-100)
-    ax1.set_xlim(left=np.amin(k_range_mdl)*0.8, right=np.amax(k_range_mdl)*1.2)
-    ax1.set_ylabel('Percent error')
-    ax1.set_xlabel('Spatial Frequency [{0}]'.format(mdl_set[0].k_range.unit))
-    ax1.annotate('Mean abs error %: {0:.4}%\nRMS ratio: {1:.3f}%'.format(avg_err, rms_ratio), **anno_opts)
-
-    plt.tight_layout()
 
 ###########################################
 # BUILD SURFACE
@@ -798,11 +738,8 @@ def k_interp(oap_label, kval, npix_diam, norm_1Dpsd, cal_1Dpsd, k_npts):
 
     # Write the matrices for the data
     psd1D_data = np.zeros((ntot, k_npts)) # all k_val is same size
-    #print('size of psd1D_data: {0}'.format(np.shape(psd1D_data)))
     psd1D_norm = np.zeros((ntot, k_npts)) # all k_val is same size
-    #print('size of psd1D_norm: {0}'.format(np.shape(psd1D_norm)))
     k_out = np.zeros_like((psd1D_data))
-    #print('size of k_out: {0}'.format(np.shape(k_out)))
     
     # fill in the data matricies from the PSD simulation and interpolate
     for no in range(0,ntot):
@@ -837,7 +774,7 @@ def k_interp(oap_label, kval, npix_diam, norm_1Dpsd, cal_1Dpsd, k_npts):
 
 def han2d(shape, fraction=1./np.sqrt(2), normalize=False):
     '''
-    Code generated by Kyle Van Gorkom.
+    Code written by Kyle Van Gorkom.
     Radial Hanning window scaled to a fraction 
     of the array size.
     
@@ -858,7 +795,7 @@ def han2d(shape, fraction=1./np.sqrt(2), normalize=False):
 
 def get_radial_dist(shape, scaleyx=(1.0, 1.0)):
     '''
-    Code generated by Kyle Van Gorkom.
+    Code written by Kyle Van Gorkom.
     Compute the radial separation of each pixel
     from the center of a 2D array, and optionally 
     scale in x and y.
@@ -867,62 +804,6 @@ def get_radial_dist(shape, scaleyx=(1.0, 1.0)):
     cenyx = ( (shape[0] - 1) / 2., (shape[1] - 1)  / 2.)
     radial = np.sqrt( (scaleyx[0]*(indices[0] - cenyx[0]))**2 + (scaleyx[1]*(indices[1] - cenyx[1]))**2 )
     return radial
-
-def zeroPadOversample(optic_data,oversamp):
-    '''
-    Makes zero pad based on oversampling requirements
-    Input:
-    optic_data  - 2D array of data
-    oversamp    - oversampling multiplier
-    Output:
-    zp_wf       - zero padded wavefront
-    '''
-    n_row = np.shape(optic_data)[0]
-    n_col = np.shape(optic_data)[1]
-    
-    if n_row != n_col: # check if a symmetric matrix is being passed in
-        # zero pad data into symmetric matrix
-        data = zeroPadSquare(optic_data)
-        # recalibrate the number of rows and columns
-        n_row = np.shape(data)[0]
-        n_col = np.shape(data)[1]
-    else:
-        data = np.copy(optic_data)
-    # Sample the matrix as some 2-factor value
-    samp = getSampSide(data)
-    
-    # This is the oversampled side size
-    side = samp * oversamp
-    # NOTE: This will not work for an odd symmetric matrix! If you get an error, this is why.
-    row_pad = np.int((side - n_row)/2)
-    zp_wf = np.pad(data, (row_pad,row_pad), 'constant')
-                
-    return zp_wf
-
-def getSampSide(optic_data):
-    '''
-    Calculates the sample side based on the largest side of image
-    Input:
-    optic_data  - 2D array of the data
-    Output:
-    samp        - sample side value
-    '''
-    # Choose the larger side first
-    if np.shape(optic_data)[0] > np.shape(optic_data)[1]:
-        samp_side = np.shape(optic_data)[0]
-    else:
-        samp_side = np.shape(optic_data)[1]
-    
-    # Choosing a sample size
-    if samp_side < 512:
-        if samp_side < 256:
-            samp = 256
-        else:
-            samp = 512
-    else:
-        samp = 1024
-    
-    return samp
 
 def set_k_range(k_spacing, k_limit):
     # custom setting spatial frequency range
