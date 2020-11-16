@@ -68,7 +68,7 @@ class surfPSD:
         else:
             self.mask = mask.astype(bool)
             self.npix_diam = int(np.sum(mask[int(mask.shape[0]/2)]))
-            self.diam_ca = (self.npix_diam * u.pix * self.latres).to(u.mm)
+            self.diam_ca = (self.npix_diam * u.pix * self.latres)#.to(u.mm)
             
     def open_psd(self, psd_fileloc, psd_type, var_unit = u.nm):
         psd_fits = fits.open(psd_fileloc)[0]
@@ -197,9 +197,9 @@ class surfPSD:
         self.psd_norm *= mask
         self.psd_cal *= mask
     
-    def calc_psd_radial(self, ring_width):
+    def calc_psd_radial(self, ring_width, kmin=None):
         # shortcut version for basic code analysis
-        (self.k_radial, self.psd_radial_cal) = do_psd_radial(psd_data=self.psd_cal, delta_k=self.delta_k, ring_width=ring_width)
+        (self.k_radial, self.psd_radial_cal) = do_psd_radial(psd_data=self.psd_cal, delta_k=self.delta_k, ring_width=ring_width, kmin=kmin)
     
     def calc_rms_set(self, kmid_ll, khigh_ll, pwr_opt, print_rms=False, print_kloc=False):
         # Calculate the RMS based on the k-parameter limits
@@ -608,10 +608,28 @@ class model_combine:
             mdl_sum_data = mdl_sum_data + (model_full(k=self.k_radial_data, psd_parm=parm).value * self.psd_weight[j])
         self.psd_parm = new_parm
         self.psd_radial_sum = mdl_sum * new_mdl.unit
-        self.psd_radial_sum_data = mdl_sum_data * new_mdl.unit
+        self.psd_radial_sum_data = mdl_sum_data * new_mdl.unit 
+        
+    def overwrite_parm(self, section_num, overwrite_parm):
+        n_psd = len(self.psd_parm)
+        new_parm = copy.copy(self.psd_parm)
+        new_parm[section_num] = overwrite_parm
+        
+        # reset the psd parameters and the total PSD sums
+        mdl_sum = np.zeros_like(self.psd_radial_sum.value)
+        mdl_sum_data = np.zeros_like(self.psd_radial_data.value)
+        for j in range(0, n_psd):
+            new_mdl = model_full(k=self.k_radial_model, psd_parm=new_parm[j])
+            mdl_sum = mdl_sum + (new_mdl.value * self.psd_weight[j])
+            mdl_sum_data = mdl_sum_data + (model_full(k=self.k_radial_data, psd_parm=new_parm[j]).value * self.psd_weight[j])
+        self.psd_parm = new_parm
+        self.psd_radial_sum = mdl_sum * new_mdl.unit
+        self.psd_radial_sum_data = mdl_sum_data * new_mdl.unit 
+        
         
     def calc_error(self):
         self.error = np.log10(self.psd_radial_sum_data.value/self.psd_radial_data.value)
+        self.error_rms = np.sqrt(np.mean(np.square(self.error)))
         
     def calc_psd_rms(self):
         # build the k-map
@@ -634,6 +652,54 @@ class model_combine:
         k_tgt_lim = [self.k_min, self.k_max]
         self.psd_rms_sum = do_psd_rms(psd_data=psd_2D, delta_k=self.delta_k, 
                                   k_tgt_lim=k_tgt_lim, print_rms=False, print_kloc=False)
+
+# Plotting assistance
+def plot_model2(mdl_set, model_sum, avg_psd, opt_parms):
+    k_radial = avg_psd.k_radial.value
+    psd_radial = avg_psd.psd_radial_cal.value
+    k_range_mdl = mdl_set[0].k_range.value
+    
+    color_list=['r', 'b', 'y', 'g', 'c']
+    anno_opts = dict(xy=(0.1, .9), xycoords='axes fraction',
+                     va='center', ha='center')
+
+    plt.figure(figsize=[14,9],dpi=100)
+    gs = gridspec.GridSpec(ncols=1, nrows=2, height_ratios=[4,2])
+    ax0 = plt.subplot(gs[0])  
+    ax0.loglog(k_radial, psd_radial, 'k', linewidth=3, label='Avg PSD (PTT, all steps)\nRMS={0:.5f}'.format(avg_psd.rms_tot))
+    for j in range(0, len(mdl_set)):
+        psd_value = model_full(k=mdl_set[0].k_range, psd_parm=model_sum.psd_parm[j]) * model_sum.psd_weight[j]
+        plt_label = '{0}: {1}={2:.3f} {3}={4:.3e}\n'.format(r'$r_{0}$'.format(mdl_set[j].region_num),
+                                                             r'$\alpha$', model_sum.psd_parm[j][0], 
+                                                             r'$\beta$', model_sum.psd_parm[j][1].value)
+        plt_label = plt_label + '{0}={1:.1e}, {2}={3:.2e}, {4}={5:.1e}A\n'.format(r'$L_{0}$',model_sum.psd_parm[j][2], 
+                                                                                   r'$l_{0}$', model_sum.psd_parm[j][3], 
+                                                                                   r'$\sigma_{sr}$', mdl_set[j].rms_sr.to(u.angstrom).value)
+        plt_label = plt_label + '{0}={1:.2f}'.format(r'$a_{0}$'.format(j), model_sum.psd_weight[j])
+        ax0.loglog(mdl_set[j].k_range.value, psd_value.value, color_list[j]+':', linewidth=1.5,
+                   label=plt_label)
+        # draw in the color box
+        ax0.axvspan(k_radial[mdl_set[j].i_start], k_radial[mdl_set[j].i_end], facecolor=color_list[j], alpha=0.1)
+    mdl_sum_text = 'model sum {0}\nRMS={1:.5f}'.format(r'$\Sigma a_{n}r_{n}$', model_sum.psd_rms_sum)
+    ax0.loglog(k_range_mdl, model_sum.psd_radial_sum.value, linewidth=2.5, label=mdl_sum_text)
+    ax0.set_xlim(left=np.amin(k_range_mdl)*0.8, right=np.amax(k_range_mdl)*1.2)
+    ax0.set_ylim(bottom=1e-11)
+    ax0.set_ylabel('PSD ({0})'.format(mdl_set[0].psd_full.unit))
+    ax0.legend(prop={'size':8})#,loc='center left', bbox_to_anchor=(1, 0.5))
+    ax0.set_title('MagAO-X PSD modeling (PRELIMINARY VISUAL): {0}, {1}% CA'.format(opt_parms['label'], opt_parms['ca']))
+    
+    err_rms = np.sqrt(np.mean(np.square(model_sum.error)))
+    ax1 = plt.subplot(gs[1])
+    ax1.semilogx(k_radial, model_sum.error)
+    ax1.hlines(y=0, xmin=np.amin(k_range_mdl)*0.8, xmax=np.amax(k_range_mdl)*1.2, color='k')
+    ax1.set_ylim(top=0.5, bottom=-0.5)
+    ax1.set_xlim(left=np.amin(k_range_mdl)*0.8, right=np.amax(k_range_mdl)*1.2)
+    ax1.set_ylabel('log10( model / measured)')
+    ax1.set_xlabel('Spatial Frequency [{0}]'.format(mdl_set[0].k_range.unit))
+    ax1.annotate('Error RMS: {0:.4}'.format(err_rms), **anno_opts)
+
+    plt.tight_layout()
+
 
 ###########################################
 # BUILD SURFACE
@@ -810,7 +876,7 @@ def set_k_range(k_spacing, k_limit):
     k_extend = np.arange(start=k_limit[0].value, stop=k_limit[1].value, step=k_spacing.value)
     return k_extend * k_spacing.unit
 
-def do_psd_radial(psd_data, delta_k, ring_width=3):
+def do_psd_radial(psd_data, delta_k, ring_width=3, kmin=None):
     # a different version for less frills.
     # formerly new_psd_radial
     if hasattr(psd_data, 'unit'):
@@ -837,12 +903,20 @@ def do_psd_radial(psd_data, delta_k, ring_width=3):
     else:
         my, mx = np.ogrid[-cen:cen+1, -cen:cen+1]
     radial_freq = mx[0][cen:side]*delta_k
+    
+    if kmin is not None:
+        ind_start, k_val = k_locate(freqrange = radial_freq * delta_k_unit, k_tgt = kmin)
+        if k_val < kmin:
+            ind_start = ind_start + 1
+    else:
+        ind_start = ring_side
 
     # initialize content
     mean_bin = [] # initialize empty list of mean PSD values
     k_val = [] # initialize empty list of spatial frequencies
     
-    for test_radius in range(ring_side, cen): # starting at ring_side provides minimum distance for calculation
+    #for test_radius in range(ring_side, cen): # starting at ring_side provides minimum distance for calculation
+    for test_radius in range(ind_start, cen):
         ring_mask_in = mx**2 + my**2 <= (test_radius-ring_side)**2
         ring_mask_out = mx**2 + my**2 <= (test_radius+ring_side)**2
         ring_mask = ring_mask_out ^ ring_mask_in #XOR statement
