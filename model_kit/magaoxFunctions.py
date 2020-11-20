@@ -25,7 +25,7 @@ from poppy.poppy_core import PlaneType
 # FUNCTION DEFINITIONS
 #########################################
 
-def surfFITS(file_loc, optic_type, opdunit, name):
+def surfFITS(file_loc, optic_type, opdunit, name, apply_reflection=False):
     '''
     Initiates a FITS file to add to optical system.
     Input Parameters:
@@ -49,7 +49,10 @@ def surfFITS(file_loc, optic_type, opdunit, name):
     '''
     optic_fits = fits.open(file_loc)
     optic_fits[0].data = np.float_(optic_fits[0].data) # typecasting for POPPY workaround
+        
     if optic_type == 'opd':
+        if apply_reflection is True:
+            optic_fits[0].data = optic_fits[0].data * 2 
         optic_surf = poppy.FITSOpticalElement(name = name, opd=optic_fits, opdunits = opdunit)
     else:
         optic_surf = poppy.FITSOpticalElement(name = name, transmission=optic_fits)
@@ -120,8 +123,25 @@ def makeRxCSV(csv_file, print_names=False):
         print(sys_rx.dtype.names)
     return sys_rx
 
+def gen_mag_pupil(entrance_radius):
+    m1_ap = poppy.CircularAperture(name='circ', radius = entrance_radius)
+    rescale = entrance_radius.value / 3.25
+    spider = np.array([0.01905, 0.0381,0.01905, 0.0381]) * rescale
+    offset_y = np.array([0.34, -0.34, 0.34, -0.34]) * rescale
+    secobs = poppy.AsymmetricSecondaryObscuration(secondary_radius=np.around(entrance_radius*0.29, decimals=4),
+                                                  support_angle=[45,135, -45, -135],
+                                                  support_width=spider.tolist(),
+                                                  support_offset_x=[0, 0, 0, 0],
+                                                  support_offset_y= offset_y.tolist())
+    m1_pupil = poppy.CompoundAnalyticOptic(opticslist=[m1_ap, secobs], name='Mag pupil')
+    return m1_pupil
 
-def csvFresnel(rx_csv, samp, oversamp, break_plane, wf_insert=None, psd_dict=None, seed=None):
+def mag_pupil_mask(samp, entrance_radius, wavelength):
+    m1_pupil = gen_mag_pupil(entrance_radius)
+    wf = poppy.poppy_core.Wavefront(npix=samp, diam=entrance_radius*2, wavelength=wavelength)
+    return m1_pupil.get_transmission(wf)
+    
+def csvFresnel(rx_csv, samp, oversamp, break_plane, home_folder=None, wf_insert=None, psd_dict=None, seed=None):
     '''
     Builds FresnelOpticalSystem from a prescription CSV file passed in and using PSD WFE class.
     Input parameters:
@@ -149,6 +169,9 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, wf_insert=None, psd_dict=Non
 
     # Entrance Aperture
     sys_build.add_optic(poppy.CircularAperture(radius=entrance_radius))
+    
+    # Entrance pupil
+    #sys_build.add_optic(gen_mag_pupil(entrance_radius))
     
     # Check to initialize with an input wavefront from previous calculation
     if wf_insert is not None:
@@ -179,7 +202,7 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, wf_insert=None, psd_dict=Non
         # call in surface name to see if it needs to do PSD
         surf_filename = optic['surf_PSD_filename']
         
-        if surf_filename != 'none': # if PSD file present
+        if surf_filename != 'none': # if PSD file present or surface file to open
             if surf_filename[0:3] == 'psd': # check if surface needs to be built using PSD parameters
                 psd_parm = psd_dict[surf_filename]
                 psd_weight = psd_dict[surf_filename+'_weight']
@@ -187,10 +210,12 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, wf_insert=None, psd_dict=Non
                     psd_seed = seed[n_optic]
                 else:
                     psd_seed = None
-                optic_surface = poppy.wfe.ModelPSDWFE(name = optic['Name']+' PSD WFE', 
-                                                      psd_parameters=psd_parm, psd_weight=psd_weight, seed=psd_seed)
+                optic_surface = poppy.wfe.PowerSpectrumWFE(name = optic['surf_PSD_filename']+' PSD WFE', 
+                                                           psd_parameters=psd_parm, psd_weight=psd_weight, seed=psd_seed)
             else: # need to open surface file
                 surf_file_loc = optic['surf_PSD_folder'] + optic['surf_PSD_filename'] + '.fits'
+                if home_folder is not None:
+                    surf_file_loc = home_folder+surf_file_loc
                 # call surfFITS to send out surface map
                 optic_surface = surfFITS(file_loc = surf_file_loc, optic_type = optic['optic_type'], 
                                          opdunit = optic['OPD_unit'], name = optic['Name']+' surface')
@@ -206,7 +231,10 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, wf_insert=None, psd_dict=Non
                 sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
 
         else: # if no surface file present (DM, focal plane, testing optical surface)
-            if fl !=0: # if powered optic is being tested
+            if optic['Type'] == 'pupil':
+                sys_build.add_optic(gen_mag_pupil(entrance_radius))
+            
+            elif fl !=0: # if powered optic is being tested
                 sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name']), distance=dz)
                 sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
             
