@@ -155,7 +155,7 @@ def calc_zernike_proj(data, nterms, wavelength=None, mask_full=None, mask_dust=N
     elif mask_full is not None:
         zern_maps = np.zeros((nterms, data.shape[0], data.shape[1]))
         for j in range(0, nterms):
-            zern_maps[j] = calc_zernike_phase(j_index=j+1, ap_diam=data.shape[0])
+            zern_maps[j] = calc_zernike_phase(j_index=j+1, ap_diam=data.shape[0])*mask_full
         mask_1d_coord = np.where(np.reshape(mask_full, (vec1d))==True)
     else:
         raise Exception('Need an aperture mask passed in, either mask_full or mask_dust')
