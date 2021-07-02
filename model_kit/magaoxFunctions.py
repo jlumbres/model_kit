@@ -175,7 +175,7 @@ def mag_pupil_mask(samp, entrance_radius, wavelength, bump=False):
     return m1_pupil.get_transmission(wf)
     
 def csvFresnel(rx_csv, samp, oversamp, break_plane, home_folder=None, 
-               psd_dict=None, seed=None, psd_reflection=True, print_rx=False, bump=False):
+               psd_dict=None, seed=None, psd_reflection=True, print_rx=False, bump=False, psdwfe_ver='old'):
     '''
     Builds FresnelOpticalSystem from a prescription CSV file passed in and using PSD WFE class.
     Input parameters:
@@ -228,10 +228,18 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, home_folder=None,
                     psd_seed = seed[optic['Optical_Element_Number']]
                 else:
                     psd_seed = None
-                optic_surface = poppy.wfe.PowerSpectrumWFE(name = optic['surf_PSD_filename']+' PSD WFE', 
-                                                        psd_parameters=psd_parm, psd_weight=psd_weight, 
-                                                        seed=psd_seed, apply_reflection = psd_reflection,
-                                                        wfe=psd_wfe, incident_angle=opt_angle)
+                
+                # choose which version of PowerSpectrumWFE to run
+                if psdwfe_ver == 'old':
+                    optic_surface = poppy.wfe.PowerSpectrumWFE_old(name = optic['surf_PSD_filename']+' PSD WFE', 
+                                                            psd_parameters=psd_parm, psd_weight=psd_weight, 
+                                                            seed=psd_seed, apply_reflection = psd_reflection,
+                                                            wfe=psd_wfe, incident_angle=opt_angle)
+                else:
+                    optic_surface = poppy.wfe.PowerSpectrumWFE(name = optic['surf_PSD_filename']+' PSD WFE',
+                                                            psd_parameters=psd_parm, psd_weight=psd_weight, 
+                                                            seed=psd_seed, apply_reflection = psd_reflection,
+                                                            wfe=psd_wfe, incident_angle=opt_angle)
             else: # need to open wfe file
                 if print_rx == True:
                     print('{0}: load wfe fits file ({1})'.format(optic['Name'], optic['surf_PSD_filename']))
@@ -281,6 +289,180 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, home_folder=None,
             break
         
     return sys_build
+
+# TODO: document this section!!
+def write_psdwfe(wavefront, rx_opt_data, seed_val, psd_parameters, psd_weight, wfe_folder, wfe_filename,
+                 apply_reflection=False):
+    opt_name = rx_opt_data['Name']
+    psd_wfe_rms = rx_opt_data['Beam_rms_nm']*u.nm
+    opt_angle = rx_opt_data['Incident_Angle_deg']*u.deg
+    d_beam = rx_opt_data['Beam_Diameter_m']*u.m
+    
+    # initialize the wfe
+    psd_wfe = poppy.wfe.PowerSpectrumWFE_old(name = opt_name+' PSD WFE',
+                                             psd_parameters = psd_parameters,
+                                             psd_weight = psd_weight,
+                                             seed = seed_val,
+                                             apply_reflection = apply_reflection,
+                                             wfe = psd_wfe_rms,
+                                             incident_angle = opt_angle)
+    # calculate the opd
+    psd_opd = (psd_wfe.get_opd(wavefront))*u.m # output has no units, but it's in meters.
+    
+    # initialize values for FITS header
+    br = 1/wavefront.oversample
+    npix = int(wavefront.n / wavefront.oversample)
+    wavelen = wavefront.wavelength
+    pixscale = wavefront._pixelscale_m
+    
+    # initialize the FITS header
+    fhdr = fits.Header()
+    fhdr.set('opt_name', opt_name, 
+                'Optical element name')
+    fhdr.set('opt_ind', rx_opt_data['Optical_Element_Number'], 
+                'Optical element number (j) from rx csv')
+    fhdr.set('npix', npix, 
+                'Sample size, pre-oversample')
+    fhdr.set('oversamp', br, 
+                'Oversample ratio')
+    fhdr.set('wavelen', wavelen.value, 
+                'Wavelength for Fresnel calc [{0}]'.format(str(wavelen.unit)))
+    fhdr.set('puplscal', pixscale.value, # old files may use pixscale, but puplscal required for poppy.
+                'Wavefront pixscale [{0}]'.format(str(pixscale.unit)))
+    fhdr.set('d_beam', d_beam.value,
+                'Beam diameter [{0}]'.format(str(d_beam.unit)))
+    fhdr.set('bunit', str(psd_opd.unit), # formerly opd_unit
+                'Units of opd wfe')
+    fhdr.set('wfe_rms', psd_wfe_rms.value,
+                'Surface rms at beam diam [{0}]'.format(str(psd_wfe_rms.unit)))
+    fhdr.set('i_angle', opt_angle.value,
+                'Incident angle [{0}]'.format(str(opt_angle.unit)))
+    fhdr.set('opd_refl', apply_reflection,
+                'Boolean: OPD reflection applied')
+    fhdr.set('psd_type', rx_opt_data['surf_PSD_filename'],
+                'PSD model used')
+    fhdr.set('seed', seed_val,
+                'Randomizer seed value')
+
+    # write the file
+    fits.writeto(wfe_folder + wfe_filename + '.fits', psd_opd.value, fhdr, overwrite=True)
+    
+
+def csvFresnel_vapptilt(rx_csv, samp, oversamp, break_plane, home_folder=None, 
+                        psd_dict=None, seed=None, psd_reflection=True, print_rx=False, 
+                        bump=False, apply_tilt=[0, 0, 0]):
+    '''
+    Builds FresnelOpticalSystem from a prescription CSV file passed in and using PSD WFE class.
+    Input parameters:
+        rx_csv : probably numpy array?
+            Optical system prescription built from csv file
+        samp : index
+            Number of pixels resolution before zero padding
+        oversamp : float
+            Oversampling convention used in PROPER for how big to zero pad
+        break_plane : string
+            Plane to break building the MagAO-X prescription
+        psd_dict : dictionary
+            Contains the PSD parameters listed in dictionary format for various optics
+            Not necessary if using file uploads exclusively.
+        seed : iterable of intergers
+            Seed for the random phase screen generator used in PSD surface building.
+            Not necessary if using 
+    Output:
+        sys_build : poppy.FresnelOpticalSystem object 
+            Complete optical system built with propagation, prescriptions included
+    '''
+    entrance_radius=rx_csv['Radius_m'][0]*u.m 
+    
+    sys_build = poppy.FresnelOpticalSystem(pupil_diameter=2*entrance_radius, 
+                                           npix=samp, beam_ratio=oversamp)
+
+    # Entrance Aperture
+    sys_build.add_optic(poppy.CircularAperture(radius=entrance_radius))
+        
+    # Build MagAO-X optical system from CSV file
+    for n_optic,optic in enumerate(rx_csv): # n_optic: count, optic: value
+
+        dz = optic['Distance_m'] * u.m # Propagation distance from the previous optic (n_optic-1)
+        fl = optic['Focal_Length_m'] * u.m # Focal length of the current optic (n_optic)
+
+        # call in surface name to see if it needs to do PSD
+        wfe_filename = optic['surf_PSD_filename']
+        
+        # if PSD file present or surface file to open
+        if wfe_filename != 'none' and optic['optic_type'] != 'none': 
+            if wfe_filename[0:3] == 'psd': # 'psd' notifies to calculate wfe using psd parameters
+                if print_rx==True:
+                    print('{0}: calculate psd wfe'.format(optic['Name']))
+                psd_parm = psd_dict[wfe_filename]
+                psd_weight = psd_dict[wfe_filename+'_weight']
+                #psd_wfe = psd_dict[wfe_filename+'_rms']
+                psd_wfe = optic['Beam_rms_nm']*u.nm
+                opt_angle = optic['Incident_Angle_deg']*u.deg
+                if seed is not None:
+                    #psd_seed = seed[n_optic]
+                    psd_seed = seed[optic['Optical_Element_Number']]
+                else:
+                    psd_seed = None
+                optic_surface = poppy.wfe.PowerSpectrumWFE(name = optic['surf_PSD_filename']+' PSD WFE', 
+                                                        psd_parameters=psd_parm, psd_weight=psd_weight, 
+                                                        seed=psd_seed, apply_reflection = psd_reflection,
+                                                        wfe=psd_wfe, incident_angle=opt_angle)
+            else: # need to open wfe file
+                if print_rx == True:
+                    print('{0}: load wfe fits file ({1})'.format(optic['Name'], optic['surf_PSD_filename']))
+                surf_file_loc = optic['surf_PSD_folder'] + optic['surf_PSD_filename'] + '.fits'
+                if home_folder is not None:
+                    surf_file_loc = home_folder+surf_file_loc
+                # call surfFITS to send out surface map
+                optic_surface = surfFITS(file_loc = surf_file_loc, optic_type = optic['optic_type'], 
+                                         opdunit = optic['OPD_unit'], name = optic['Name']+' WFE',
+                                         refl_angle = optic['Incident_Angle_deg']*u.deg)
+            
+            # Add generated surface map to optical system
+            sys_build.add_optic(optic_surface,distance=dz)
+            
+            if fl != 0: # apply power if powered optic
+                sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name'])) 
+                # no distance; surface comes first
+                #sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture")) 
+            if optic['Type'] not in ['pupil', 'vapp'] and optic['Radius_m'] > 0: # non-powered optic n
+                sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
+                
+        elif optic['Type'] == 'zern': # apply the tilt balance
+            tilt_wfe = poppy.ZernikeWFE(coefficients=apply_tilt, 
+                                        radius=optic['Beam_Diameter_m']*0.956/2)
+            sys_build.add_optic(tilt_wfe)
+
+        else: # if no wfe file present (DM, focal plane, testing optical surface)
+            if print_rx == True:
+                print('{0}: no wfe to inject'.format(optic['Name']))
+                
+            if optic['Type'] == 'pupil':
+                sys_build.add_optic(gen_mag_pupil(entrance_radius, samp, bump=bump))
+            
+            elif fl !=0: # if powered optic is being tested
+                sys_build.add_optic(poppy.QuadraticLens(fl,name=optic['Name']), distance=dz)
+                if optic['Radius_m'] > 0:
+                    sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
+            
+            # for DM, flat mirrors
+            elif optic['Type'] in ['mirror', 'DM']:
+                sys_build.add_optic(poppy.ScalarTransmission(planetype=PlaneType.intermediate, name=optic['Name']),distance=dz)
+                if optic['Radius_m'] > 0:
+                    sys_build.add_optic(poppy.CircularAperture(radius=optic['Radius_m']*u.m, name=optic['Name']+" aperture"))
+
+            else: # for focal plane, science plane, lyot plane
+                sys_build.add_optic(poppy.ScalarTransmission(planetype=PlaneType.intermediate, name=optic['Name']),distance=dz)
+                
+        # if the most recent optic studied was the break plane, break out of loop.
+        if optic['Name'] == break_plane:
+            if print_rx == True:
+                print('{0}: Finish building FresnelOpticalSystem'.format(optic['Name']))
+            break
+        
+    return sys_build
+
 
 
 def calcFraunhofer_mwfs(fr_parm, pupil_file, vapp_folder, write_file=False):
