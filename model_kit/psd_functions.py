@@ -531,9 +531,9 @@ def model_full(k, psd_parm):
     if L0.value == 0: # need to skip out the L0 value or else it explodes
         pk = beta/((k**2)**(alpha*.5))
     else:
-        if L0.unit != (1/k.unit):# check units before calculating
+        if L0.unit != ((1/k).unit):# check units before calculating
             print('Changing L0 unit to match with 1/dk units')
-            L0.to(1/k.unit) # match the unit with the spatial frequency
+            L0.to((1/k).unit) # match the unit with the spatial frequency
         pk = beta / (((L0**-2) + (k**2))**(alpha*.5))
     if lo != 0: #lo should be a unitless number
         pk = pk * np.exp(-(k.value*lo)**2) # the exponential needs to be unitless
@@ -558,6 +558,7 @@ class model_combine:
         # collect data from the average PSD object
         self.delta_k = avg_psd.delta_k
         self.npix_diam = avg_psd.npix_diam
+        self.side = np.shape(avg_psd.psd_cal)[0]
         self.k_min = avg_psd.k_min
         self.k_max = avg_psd.k_max
         self.k_radial_data = avg_psd.k_radial
@@ -632,26 +633,10 @@ class model_combine:
         self.error_rms = np.sqrt(np.mean(np.square(self.error)))
         
     def calc_psd_rms(self):
-        # build the k-map
-        cen = int(self.npix_diam/2)
-        if self.npix_diam%2 == 0:
-            ky, kx = np.ogrid[-cen:cen, -cen:cen]
-        else:
-            ky, kx = np.ogrid[-cen:cen+1, -cen:cen+1]
-        ky = ky*self.delta_k
-        kx = kx*self.delta_k
-        k_map = np.sqrt(kx**2 + ky**2)
-        
-        # calculate the 2D PSD
-        psd_mdl = np.zeros_like(k_map.value)
-        for n in range(0, len(self.psd_weight)):
-            psd_mdl = psd_mdl + (model_full(k=k_map, psd_parm=self.psd_parm[n]).value * self.psd_weight[n])
-        psd_2D = psd_mdl * self.psd_radial_sum.unit
-        
-        # with the PSD calculated, do the RMS
-        k_tgt_lim = [self.k_min, self.k_max]
-        self.psd_rms_sum = do_psd_rms(psd_data=psd_2D, delta_k=self.delta_k, 
-                                  k_tgt_lim=k_tgt_lim, print_rms=False, print_kloc=False)
+        # note: changed npix_diam to side because this should work for oversampled optics too. (2020/12/15)
+        self.psd_rms_sum = calc_model_rms(psd_parm=self.psd_parm, psd_weight=self.psd_weight, 
+                                          side=self.side, delta_k=self.delta_k, 
+                                          k_tgt_lim=[self.k_min, self.k_max])
 
 # Plotting assistance
 def plot_model2(mdl_set, model_sum, avg_psd, opt_parms):
@@ -699,6 +684,104 @@ def plot_model2(mdl_set, model_sum, avg_psd, opt_parms):
     ax1.annotate('Error RMS: {0:.4}'.format(err_rms), **anno_opts)
 
     plt.tight_layout()
+
+# Saving the combined PSD dictionary to FITS table format
+def psd_dict_to_fits(psd_dict, opt_name, fits_filename,
+                 surf_unit=u.nm, lat_unit=u.m):
+    # get the names of the dictionary entries
+    rms_name = 'psd_{0}_rms'.format(opt_name)
+    weight_name = 'psd_{0}_weight'.format(opt_name)
+    parm_name = 'psd_{0}'.format(opt_name)
+    
+    # build the values in different arrays
+    psd_rms = psd_dict[rms_name].value
+    psd_weight = psd_dict[weight_name]
+
+    tot_r = len(psd_dict[parm_name])
+    alpha = []
+    beta_val = []
+    beta_mpower = []
+    in_scale = []
+    out_scale = []
+    bsr = []
+
+    for r in range(0, tot_r):
+        psd_list = psd_dict[parm_name][r]
+        alpha.append(psd_list[0])
+        beta_val.append(psd_list[1].value)
+        beta_unit = (psd_list[1].unit/surf_unit**2).decompose()
+        beta_mpower.append(beta_unit.powers[0])
+        out_scale.append(psd_list[2].value)
+        in_scale.append(psd_list[3])
+        bsr.append(psd_list[4].value)
+        
+    # Build the FITS header, which goes in the primary HDU
+    hdr = fits.Header()
+    hdr.set('surfname', opt_name, 'name of optic')
+    hdr.set('surfunit', str(surf_unit), 'surface unit')
+    hdr.set('latunit', str(lat_unit), 'lateral scale unit')
+    hdr.set('rms', psd_rms, 'surface rms in surface units')
+    hdr['comment'] = 'The 1st card contains a table with all the PSD model parameters.'
+    hdr['comment'] = 'Each row is the PSD parameter modeled for a specific region.'
+    hdr['comment'] = 'The model region can be found in the modeling notebooks.'
+    hdr['comment'] = 'Column 0 is alpha, unitless'
+    hdr['comment'] = 'Column 1 is beta value'
+    hdr['comment'] = 'Column 2 is the power value for one of beta units'
+    hdr['comment'] = 'Beta units are surfunit2 latunit[col2]'
+    hdr['comment'] = 'Column 3 is outer scale in surfunit units'
+    hdr['comment'] = 'Column 4 is inner scale, no units'
+    hdr['comment'] = 'Column 5 is the normalized surface roughness, in PSD units'
+    hdr['comment'] = '(PSD units are in surfunit2 latunit2)'
+    hdr['comment'] = 'Column 6 is the weight value of that PSD parameter into total model'
+    hdr['comment'] = 'This is a very big mess to get the PSD model parameters, I am sorry.'
+    empty_primary = fits.PrimaryHDU(header=hdr)
+    
+    # Assemble the table HDU, which is the 2nd HDU card
+    c0 = fits.Column(name='alpha', array=alpha, format='D')
+    c1 = fits.Column(name='beta_val', array=beta_val, format='D')
+    c2 = fits.Column(name='beta_pow', array=beta_mpower, format='D')
+    c3 = fits.Column(name='o_scl', array=out_scale, format='D')
+    c4 = fits.Column(name='i_scl', array=in_scale, format='D')
+    c5 = fits.Column(name='bsr', array=bsr, format='D')
+    c6 = fits.Column(name='weight', array=psd_weight, format='D')
+    table_hdu = fits.BinTableHDU.from_columns([c0, c1, c2, c3, c4, c5, c6])
+
+    # write to file
+    hdul = fits.HDUList([empty_primary, table_hdu])
+    hdul.writeto(fits_filename, overwrite=True)
+
+# Loading the combined PSD parameters from FITS file format
+def load_psd_parm_fits(fits_filename, 
+                       surf_unit=u.nm, lat_unit=u.m):
+    # unload the fits file
+    hdul = fits.open(fits_filename)
+    
+    # initialize the dictionary terms
+    opt_name = hdul[0].header['surfname']
+    rms_name = 'psd_{0}_rms'.format(opt_name)
+    weight_name = 'psd_{0}_weight'.format(opt_name)
+    parm_name = 'psd_{0}'.format(opt_name)
+
+    # unload the table and build the values
+    data = hdul[1].data
+    tab_parm = []
+    weight_val = []
+    for j in range(0, len(data)):
+        rdata = data[j]
+        tab_region = [rdata[0],
+                      rdata[1]*(surf_unit**2)*(lat_unit**rdata[2]),
+                      rdata[3]*lat_unit,
+                      rdata[4],
+                      rdata[5]*((lat_unit*surf_unit)**2)]
+        tab_parm.append(tab_region)
+        weight_val.append(rdata[6])
+
+    # build the dictionary
+    tdict = {parm_name: tab_parm,
+             weight_name: weight_val,
+             rms_name: hdul[0].header['RMS']*surf_unit}
+    
+    return tdict
 
 
 ###########################################
@@ -928,6 +1011,33 @@ def do_psd_radial(psd_data, delta_k, ring_width=3, kmin=None):
     psd_radial = mean_bin * psd_unit #* psd_data.unit
 
     return (k_radial, psd_radial) # both should hold units
+
+def build_kmap(side, delta_k):
+    cen = int(side/2)
+    if side%2 == 0:
+        ky, kx = np.ogrid[-cen:cen, -cen:cen]
+    else:
+        ky, kx = np.ogrid[-cen:cen+1, -cen:cen+1]
+    ky = ky*delta_k
+    kx = kx*delta_k
+    kmap = np.sqrt(kx**2 + ky**2)
+    return kmap
+
+def calc_model_rms(psd_parm, psd_weight, side, delta_k, k_tgt_lim):
+    k_map = build_kmap(side = side, delta_k = delta_k)
+    
+    # calculate the 2D PSD
+    psd_mdl = np.zeros_like(k_map.value)
+    for n in range(0, len(psd_weight)):
+        mdl = model_full(k=k_map, psd_parm=psd_parm[n])
+        psd_mdl = psd_mdl + (mdl.value * psd_weight[n])
+    psd_2D = psd_mdl * mdl.unit
+    
+    # with the PSD calculated, do the RMS
+    psd_rms_sum = do_psd_rms(psd_data=psd_2D, delta_k=delta_k, 
+                             k_tgt_lim=k_tgt_lim, print_rms=False, print_kloc=False)
+    return psd_rms_sum
+
 
 def do_psd_rms(psd_data, delta_k, k_tgt_lim, print_rms=False, print_kloc=False):   
     # create the grid
