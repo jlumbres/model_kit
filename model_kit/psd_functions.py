@@ -639,7 +639,7 @@ class model_combine:
                                           k_tgt_lim=[self.k_min, self.k_max])
 
 # Plotting assistance
-def plot_model2(mdl_set, model_sum, avg_psd, opt_parms):
+def plot_model2(mdl_set, model_sum, avg_psd, opt_parms, psd_range=[1e1, 1e-11]):
     k_radial = avg_psd.k_radial.value
     psd_radial = avg_psd.psd_radial_cal.value
     k_range_mdl = mdl_set[0].k_range.value
@@ -648,7 +648,7 @@ def plot_model2(mdl_set, model_sum, avg_psd, opt_parms):
     anno_opts = dict(xy=(0.1, .9), xycoords='axes fraction',
                      va='center', ha='center')
 
-    plt.figure(figsize=[14,9],dpi=100)
+    plt.figure(figsize=[14,9],dpi=100, facecolor='white')
     gs = gridspec.GridSpec(ncols=1, nrows=2, height_ratios=[4,2])
     ax0 = plt.subplot(gs[0])  
     ax0.loglog(k_radial, psd_radial, 'k', linewidth=3, label='Avg PSD (PTT, all steps)\nRMS={0:.5f}'.format(avg_psd.rms_tot))
@@ -668,7 +668,7 @@ def plot_model2(mdl_set, model_sum, avg_psd, opt_parms):
     mdl_sum_text = 'model sum {0}\nRMS={1:.5f}'.format(r'$\Sigma a_{n}r_{n}$', model_sum.psd_rms_sum)
     ax0.loglog(k_range_mdl, model_sum.psd_radial_sum.value, linewidth=2.5, label=mdl_sum_text)
     ax0.set_xlim(left=np.amin(k_range_mdl)*0.8, right=np.amax(k_range_mdl)*1.2)
-    ax0.set_ylim(bottom=1e-11)
+    ax0.set_ylim(top = psd_range[0], bottom=psd_range[1])
     ax0.set_ylabel('PSD ({0})'.format(mdl_set[0].psd_full.unit))
     ax0.legend(prop={'size':8})#,loc='center left', bbox_to_anchor=(1, 0.5))
     ax0.set_title('MagAO-X PSD modeling (PRELIMINARY VISUAL): {0}, {1}% CA'.format(opt_parms['label'], opt_parms['ca']))
@@ -685,8 +685,60 @@ def plot_model2(mdl_set, model_sum, avg_psd, opt_parms):
 
     plt.tight_layout()
 
+
+##########################################
+# WRITING DATA
+'''
+Set of functions for writing some data into FITS tables
+'''
+
+# Saving the radial PSD data into a FITS table format
+def psd_radial_to_fits(psd_dict, opt_name, fits_filename):
+    
+    # Assemble the table HDU for the radial PSD data
+    c0 = fits.Column(name='k_radial', array=psd_dict['k_radial'].value, format='D')
+    c1 = fits.Column(name='psd_radial', array=psd_dict['psd_radial'].value, format='D')
+    psd_hdu = fits.BinTableHDU.from_columns([c0, c1])
+    
+    # make the primary header file
+    hdr = fits.Header()
+    hdr.set('opt_name', opt_name,
+            'Name of optic')
+    hdr.set('psd_unit', str(psd_dict['psd_radial'].unit),
+            'PSD units')
+    hdr.set('rms_unit', str(psd_dict['rms_tot'].unit),
+            'rms units')
+    hdr.set('var_unit', str(psd_dict['var'].unit),
+            'variance units')
+    hdr.set('diam_ca',psd_dict['diam_ca'].value, 
+            'clear aperture diam [{0}]'.format(str(psd_dict['diam_ca'].unit)))
+    hdr.set('diam_pix', psd_dict['npix_diam'],
+            'number of pixels in clear aperture')
+    hdr.set('oversamp', psd_dict['oversamp'],
+            'FFT size array after oversampling')
+    hdr.set('delta_k', psd_dict['delta_k'].value,
+            'full psd spatial frequency resolution [{0}]'.format(str(psd_dict['delta_k'].unit)))
+    hdr.set('kmin', psd_dict['k_min'].value,
+            'minimum spatial frequency limit [{0}]'.format(str(psd_dict['k_min'].unit)))
+    hdr.set('kmax', psd_dict['k_max'].value,
+            'maximum spatial frequency limit [{0}]'.format(str(psd_dict['k_max'].unit)))
+    hdr.set('ringsize', psd_dict['ring_width'],
+            'annular size for radial PSD averaging')
+    hdr.set('rms_tot', psd_dict['rms_tot'].value,
+            'total rms [{0}]'.format(str(psd_dict['rms_tot'].unit)))
+    hdr.set('var_tot', psd_dict['var'].value,
+            'total variance used for calibrating PSD [{0}]'.format(str(psd_dict['var'].unit)))
+    hdr['comment'] = 'Table 1 will be radial PSD values'
+    hdr['comment'] = 'Column 0 is the radial spatial frequency value'
+    hdr['comment'] = 'Column 1 is the radial PSD value for the calibrated PSD'
+    empty_primary = fits.PrimaryHDU(header=hdr)
+    
+    # Write the FITS file
+    hdul = fits.HDUList([empty_primary, psd_hdu])
+    hdul.writeto(fits_filename, overwrite=True)
+
 # Saving the combined PSD dictionary to FITS table format
-def psd_dict_to_fits(psd_dict, opt_name, fits_filename,
+def psd_model_to_fits(psd_dict, opt_name, fits_filename,
                  surf_unit=u.nm, lat_unit=u.m):
     # get the names of the dictionary entries
     rms_name = 'psd_{0}_rms'.format(opt_name)
@@ -695,8 +747,19 @@ def psd_dict_to_fits(psd_dict, opt_name, fits_filename,
     
     # build the values in different arrays
     psd_rms = psd_dict[rms_name].value
+    psd_rms_model = psd_dict['rms_mod'].value
+    psd_rms_error = psd_dict['rms_err'] # unitless
+    
+    # card 3 values
+    k_range = psd_dict['k_range'].value
+    err_range = psd_dict['err_data']
+    psd_data = psd_dict['psd_data'].value
+    mdl_data = psd_dict['mdl_data'].value
+    
+    # Card 2 values
     psd_weight = psd_dict[weight_name]
-
+    k_start = psd_dict['k_start'].value
+    k_end = psd_dict['k_end'].value
     tot_r = len(psd_dict[parm_name])
     alpha = []
     beta_val = []
@@ -721,9 +784,10 @@ def psd_dict_to_fits(psd_dict, opt_name, fits_filename,
     hdr.set('surfunit', str(surf_unit), 'surface unit')
     hdr.set('latunit', str(lat_unit), 'lateral scale unit')
     hdr.set('rms', psd_rms, 'surface rms in surface units')
+    hdr.set('rms_mod', psd_rms_model, 'model rms equivalent, in surface units')
+    hdr.set('rms_err', psd_rms_error, 'error rms between measure and model, unitless')
     hdr['comment'] = 'The 1st card contains a table with all the PSD model parameters.'
     hdr['comment'] = 'Each row is the PSD parameter modeled for a specific region.'
-    hdr['comment'] = 'The model region can be found in the modeling notebooks.'
     hdr['comment'] = 'Column 0 is alpha, unitless'
     hdr['comment'] = 'Column 1 is beta value'
     hdr['comment'] = 'Column 2 is the power value for one of beta units'
@@ -732,8 +796,17 @@ def psd_dict_to_fits(psd_dict, opt_name, fits_filename,
     hdr['comment'] = 'Column 4 is inner scale, no units'
     hdr['comment'] = 'Column 5 is the normalized surface roughness, in PSD units'
     hdr['comment'] = '(PSD units are in surfunit2 latunit2)'
-    hdr['comment'] = 'Column 6 is the weight value of that PSD parameter into total model'
-    hdr['comment'] = 'This is a very big mess to get the PSD model parameters, I am sorry.'
+    hdr['comment'] = 'Column 6 is the weight value of that PSD set into total model'
+    hdr['comment'] = 'Column 7 is spatial freq. region start, units 1/latunit'
+    hdr['comment'] = 'Column 8 is spatial freq. region end, units 1/latunit'
+    hdr['comment'] = 'The 2nd card contains a table for the error rms.'
+    hdr['comment'] = 'The error rms ranges within the measured PSD spatial freq region.'
+    hdr['comment'] = 'Column 0 is the radial spatial freq value, units 1/latunit.'
+    hdr['comment'] = 'Column 1 is the radial modeled PSD value, in PSD units.'
+    hdr['comment'] = 'The model PSD is calculated at each spatial freq for all regions.'
+    hdr['comment'] = 'Column 2 is the radial measured PSD value, in PSD units.'
+    hdr['comment'] = 'Column 3 is the error rms value between measured and model.'
+    hdr['comment'] = 'This is a very big mess to get the PSD model parameters, good luck.'
     empty_primary = fits.PrimaryHDU(header=hdr)
     
     # Assemble the table HDU, which is the 2nd HDU card
@@ -744,14 +817,23 @@ def psd_dict_to_fits(psd_dict, opt_name, fits_filename,
     c4 = fits.Column(name='i_scl', array=in_scale, format='D')
     c5 = fits.Column(name='bsr', array=bsr, format='D')
     c6 = fits.Column(name='weight', array=psd_weight, format='D')
-    table_hdu = fits.BinTableHDU.from_columns([c0, c1, c2, c3, c4, c5, c6])
+    c7 = fits.Column(name='k_start', array=k_start, format='D')
+    c8 = fits.Column(name='k_end', array=k_end, format='D')
+    table_hdu = fits.BinTableHDU.from_columns([c0, c1, c2, c3, c4, c5, c6, c7, c8])
+    
+    # Assemble the 3rd HDU card, which is the radial data values
+    d0 = fits.Column(name='k_range', array=k_range, format='D')
+    d1 = fits.Column(name='mdl_data', array=mdl_data, format='D')
+    d2 = fits.Column(name='psd_data', array=psd_data, format='D')
+    d3 = fits.Column(name='err_range', array=err_range, format='D')
+    range_hdu = fits.BinTableHDU.from_columns([d0, d1, d2, d3])
 
     # write to file
-    hdul = fits.HDUList([empty_primary, table_hdu])
+    hdul = fits.HDUList([empty_primary, table_hdu, range_hdu])
     hdul.writeto(fits_filename, overwrite=True)
 
 # Loading the combined PSD parameters from FITS file format
-def load_psd_parm_fits(fits_filename, 
+def load_psd_model_fits(fits_filename, 
                        surf_unit=u.nm, lat_unit=u.m):
     # unload the fits file
     hdul = fits.open(fits_filename)
@@ -766,6 +848,8 @@ def load_psd_parm_fits(fits_filename,
     data = hdul[1].data
     tab_parm = []
     weight_val = []
+    k_start = []
+    k_end = []
     for j in range(0, len(data)):
         rdata = data[j]
         tab_region = [rdata[0],
@@ -775,11 +859,15 @@ def load_psd_parm_fits(fits_filename,
                       rdata[5]*((lat_unit*surf_unit)**2)]
         tab_parm.append(tab_region)
         weight_val.append(rdata[6])
+        k_start.append(rdata[7])
+        k_end.append(rdata[8])
 
     # build the dictionary
     tdict = {parm_name: tab_parm,
              weight_name: weight_val,
-             rms_name: hdul[0].header['RMS']*surf_unit}
+             rms_name: hdul[0].header['RMS']*surf_unit,
+             'k_start': k_start/lat_unit,
+             'k_end': k_end/lat_unit}
     
     return tdict
 
