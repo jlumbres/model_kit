@@ -25,6 +25,7 @@ from skimage.draw import draw
 
 # add in datafiles modular code
 from . import datafiles as dfx
+from . import psd_wfe_poppy
 
 ##########################################
 # surfPSD Class definition
