@@ -161,7 +161,7 @@ def calc_zernike_proj(data, nterms, wavelength=None, mask_full=None, mask_dust=N
         raise Exception('Need an aperture mask passed in, either mask_full or mask_dust')
     
     # calculate the zernike surface projections
-    data_active = np.reshape(data, (vec1d))[mask_1d_coord]
+    data_active = np.reshape(data, (vec1d))[mask_1d_coord].value
     zern_proj = np.zeros((nterms))
     for j in range(0, nterms):
         zern_active = np.reshape(zern_maps[j], vec1d)[mask_1d_coord]

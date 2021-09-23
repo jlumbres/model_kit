@@ -21,6 +21,9 @@ from astropy import units as u
 # drawing for the apertures
 from skimage.draw import draw
 
+# calling in other support functions
+import poppy
+
 ############################################
 # FILE HANDLING
 
@@ -152,6 +155,93 @@ def datx2fits(datx_file_loc, filename, diam_ca100=50*u.mm, set_surf_unit=u.micro
                                           set_surf_unit=set_surf_unit)
                                           
     write_fits(surface, mask, surf_parms, filename, surf_nan=surf_nan)
+
+############################################
+# FIXING DATA ROUTINES
+
+def apply_zern_arb(raw_surf, dust_mask, nt, opt_parms, write_file=False, folder_loc=None):
+    #tot_fm = np.shape(dust_set)[0]
+    #tot_step = np.shape(dust_set)[1]
+    #zm_cor = np.zeros_like(dust_set)
+    
+    #for nf in range(0, tot_fm): # choose optic
+    #    for ns in range(0, tot_step):
+    # build the Zernikes using the arbitrary basis for mask holes
+    zm = poppy.zernike.arbitrary_basis(aperture=dust_mask, nterms=nt, outside=0.0)
+
+    # vectorize the mask
+    vec1d = np.product(dust_mask.shape)
+    mask_vec = np.reshape(dust_mask, (vec1d))
+    mask_1d_coord = np.where(mask_vec==True)
+    mask_vec_active = mask_vec[mask_1d_coord]
+
+    # zero mean the data where active
+    surf_vec_active = np.reshape(raw_surf,(vec1d))[mask_1d_coord]
+    data_mean = np.mean(surf_vec_active) # only take mean of the region that matters
+    data_surf = raw_surf - data_mean # zero mean
+    data_surf = data_surf * dust_mask # re-calibrate the surface
+
+    # change surface units from microns to radians
+    data_surf = data_surf/(opt_parms['wavelen'].to(raw_surf.unit)/(2*np.pi*u.radian))
+
+    # Calculate the Zernike removal
+    zprj = np.zeros((nt))
+    for j in range(0, nt):
+        # choose zernike
+        zactive = np.reshape(zm[j], (vec1d))[mask_1d_coord]
+
+        # vectorize the data
+        data_vec = np.reshape(data_surf.value, (vec1d))*data_surf.unit
+        data_vec_active = data_vec[mask_1d_coord]
+
+        # calculate the dot product value based on the active regions
+        dp_num=np.dot(data_vec_active, zactive)
+        dp_den=np.dot(zactive, zactive)
+        zprj[j] = dp_num/dp_den
+
+        # apply dot product removal 
+        data_surf = (data_surf - (zprj[j]*zm[j]*u.rad)) * dust_mask
+
+    # convert back to surface units
+    final_surf = (data_surf * (opt_parms['wavelen'].to(raw_surf.unit)/(2*np.pi*u.radian))).value
+
+    # set up the FITS file header
+    if write_file == True:
+        header = fits.Header()
+        '''
+        for n in range(0, len(sp['value'])):
+            if hasattr(sp['value'][n], 'unit'):
+                value = sp['value'][n].value
+            else:
+                value = sp['value'][n]
+            header[sp['label'][n]] = (value, sp['comment'][n])
+        '''
+        header['wavelen'] = (opt_parms['wavelen'].value,
+                             'Zygo wavelength [{0}]'.format(opt_parms['wavelen'].unit))
+        header['latres'] = (opt_parms['latres'].value,
+                            'Lateral resolution [{0}]'.format(opt_parms['latres'].unit))
+        header['surfunit'] = (str(raw_surf.unit),
+                              'Surface Units')
+        header['diam_100'] = (opt_parms['diam_100CA'].value,
+                              'Full optic diameter at 100% CA [{0}]'.format(opt_parms['diam_100CA'].unit))
+        header['diam_ca'] = (opt_parms['diam_ca'].value, 
+                             'Data diameter at clear aperture [{0}]'.format(opt_parms['diam_ca'].unit))
+        header['clear_ap'] = (opt_parms['ca'], 
+                              'Clear aperture [percent]')
+
+        surf_name = 'flat_{0}_n{1}_{2}CA_step{3}'.format(opt_parms['label'], opt_parms['fm_num'], opt_parms['ca'], opt_parms['step_num'])
+        if folder_loc is not None:
+            surf_name = folder_loc+surf_name
+            
+        fits.writeto(surf_name+'_bigdust_mask.fits', dust_mask, header, overwrite=True)
+
+        for zj in range(0, zprj.shape[0]):
+            header['z{0}'.format(zj+1)] = (zprj[zj], 'Coeff. of Z{0} (Noll, POPPY arb. basis)'.format(zj+1))
+        header['COMMENT'] = 'Surface has first {0} (Noll) Zernikes removed with dust not regarded'.format(nt)
+        fits.writeto(surf_name+'_z{0}_surf.fits'.format(nt), final_surf, header, overwrite=True)
+
+    return (final_surf * raw_surf.unit), zprj
+    
     
 ############################################
 # INTERPOLATION
@@ -201,7 +291,10 @@ def reduce_ca(data, mask, old_ca, new_ca):
     
     # calculate the grid
     cen = int(mask.shape[0]/2)
-    yy, xx = np.ogrid[-cen:cen, -cen:cen]
+    if mask.shape[0] % 2 == 0:
+        yy, xx = np.ogrid[-cen:cen, -cen:cen]
+    else:
+        yy, xx = np.ogrid[-cen:cen+1, -cen:cen+1]
     r = np.sqrt(xx**2 + yy**2)
     ap_new = (r<=(diam_new/2))
     
@@ -312,34 +405,45 @@ def doCenterCrop(optic_data,shift):
     crop_data = optic_data[center-shift:center+shift,center-shift:center+shift]
     return crop_data
 
-def show2plots(supertitle, data1, plot1_label, data2, plot2_label, set_figsize=[8,8], set_dpi=150):
+def show2plots(supertitle, data1, plot1_label, data2, plot2_label, match_colorbar=False, set_figsize=[8,8], set_dpi=150):
     # Shortcut function for 2 plot drawing
     fig, (ax1, ax2) = plt.subplots(ncols=2, figsize=set_figsize, dpi=set_dpi)
     fig.suptitle(supertitle)
     
+    # check the data first
     if hasattr(data1, 'unit'):
-        show_data = data1.value
-        cb_label = str(data1.unit)
+        data_set1 = data1.value
+        cb1_label = str(data1.unit)
     else:
-        show_data = data1
-        cb_label = ''
-    img1 = ax1.imshow(show_data, origin='bottom')
+        data_set1 = data1
+        cb1_label = ''
+        
+    if hasattr(data2, 'unit'):
+        data_set2 = data2.value
+        cb2_label = str(data2.unit)
+    else:
+        data_set2 = data2
+        cb2_label = ''
+        
+    if match_colorbar==True:
+        vmin = np.amin([np.amin(data_set1), np.amin(data_set2)])
+        vmax = np.amax([np.amax(data_set1), np.amax(data_set2)])
+        
+    img1 = ax1.imshow(data_set1, origin='bottom')
     divider = make_axes_locatable(ax1)
     cax1 = divider.append_axes("bottom", size="5%", pad=0.25)
     ax1.set_title(plot1_label)
-    fig.colorbar(img1, cax=cax1, orientation='horizontal').set_label(cb_label)
+    if match_colorbar == True:
+        fig.clim(vmin=vmin, vmax=vmax)
+    fig.colorbar(img1, cax=cax1, orientation='horizontal').set_label(cb1_label)
 
-    if hasattr(data2, 'unit'):
-        show_data = data2.value
-        cb_label = str(data2.unit)
-    else:
-        show_data = data2
-        cb_label = ''
-    img2 = ax2.imshow(show_data, origin='bottom')
+    img2 = ax2.imshow(data_set2, origin='bottom')
     divider = make_axes_locatable(ax2)
     cax2 = divider.append_axes("bottom", size="5%", pad=0.25)
     ax2.set_title(plot2_label)
-    fig.colorbar(img2, cax=cax2, orientation='horizontal').set_label(cb_label)
+    if match_colorbar == True:
+        fig.clim(vmin=vmin, vmax=vmax)
+    fig.colorbar(img2, cax=cax2, orientation='horizontal').set_label(cb2_label)
     
 def calc_axis(side_len, dx=None):
     cen = int(side_len/2)
@@ -351,7 +455,7 @@ def calc_axis(side_len, dx=None):
         side_axis = side_axis * dx
     return side_axis
 
-def show_image(data, pixscale, fig_title, data_unit=None, dpi=100):
+def show_image(data, pixscale, fig_title, data_unit=None, cbar_lim=None, dpi=100):
     surf_axis = calc_axis(np.shape(data)[0], pixscale)
     axis_low = np.amin(surf_axis)
     axis_high = np.amax(surf_axis)
@@ -361,6 +465,8 @@ def show_image(data, pixscale, fig_title, data_unit=None, dpi=100):
     plt.xlabel(surf_axis.unit)
     plt.ylabel(surf_axis.unit)
     plt.title(fig_title)
+    if cbar_lim is not None:
+        plt.clim(cbar_lim[0], cbar_lim[1])
     if hasattr(data, 'unit'):
         plt.colorbar().set_label(data.unit)
     elif data_unit is not None:

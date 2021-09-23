@@ -20,6 +20,9 @@ import copy
 import poppy
 from poppy.poppy_core import PlaneType
 
+# Personal code
+from model_kit import psd_wfe_poppy
+
 
 #########################################
 # FUNCTION DEFINITIONS
@@ -289,64 +292,6 @@ def csvFresnel(rx_csv, samp, oversamp, break_plane, home_folder=None,
             break
         
     return sys_build
-
-# TODO: document this section!!
-def write_psdwfe(wavefront, rx_opt_data, seed_val, psd_parameters, psd_weight, wfe_folder, wfe_filename,
-                 apply_reflection=False):
-    opt_name = rx_opt_data['Name']
-    psd_wfe_rms = rx_opt_data['Beam_rms_nm']*u.nm
-    opt_angle = rx_opt_data['Incident_Angle_deg']*u.deg
-    d_beam = rx_opt_data['Beam_Diameter_m']*u.m
-    
-    # initialize the wfe
-    psd_wfe = poppy.wfe.PowerSpectrumWFE_old(name = opt_name+' PSD WFE',
-                                             psd_parameters = psd_parameters,
-                                             psd_weight = psd_weight,
-                                             seed = seed_val,
-                                             apply_reflection = apply_reflection,
-                                             wfe = psd_wfe_rms,
-                                             incident_angle = opt_angle)
-    # calculate the opd
-    psd_opd = (psd_wfe.get_opd(wavefront))*u.m # output has no units, but it's in meters.
-    
-    # initialize values for FITS header
-    br = 1/wavefront.oversample
-    npix = int(wavefront.n / wavefront.oversample)
-    wavelen = wavefront.wavelength
-    pixscale = wavefront._pixelscale_m
-    
-    # initialize the FITS header
-    fhdr = fits.Header()
-    fhdr.set('opt_name', opt_name, 
-                'Optical element name')
-    fhdr.set('opt_ind', rx_opt_data['Optical_Element_Number'], 
-                'Optical element number (j) from rx csv')
-    fhdr.set('npix', npix, 
-                'Sample size, pre-oversample')
-    fhdr.set('oversamp', br, 
-                'Oversample ratio')
-    fhdr.set('wavelen', wavelen.value, 
-                'Wavelength for Fresnel calc [{0}]'.format(str(wavelen.unit)))
-    fhdr.set('puplscal', pixscale.value, # old files may use pixscale, but puplscal required for poppy.
-                'Wavefront pixscale [{0}]'.format(str(pixscale.unit)))
-    fhdr.set('d_beam', d_beam.value,
-                'Beam diameter [{0}]'.format(str(d_beam.unit)))
-    fhdr.set('bunit', str(psd_opd.unit), # formerly opd_unit
-                'Units of opd wfe')
-    fhdr.set('wfe_rms', psd_wfe_rms.value,
-                'Surface rms at beam diam [{0}]'.format(str(psd_wfe_rms.unit)))
-    fhdr.set('i_angle', opt_angle.value,
-                'Incident angle [{0}]'.format(str(opt_angle.unit)))
-    fhdr.set('opd_refl', apply_reflection,
-                'Boolean: OPD reflection applied')
-    fhdr.set('psd_type', rx_opt_data['surf_PSD_filename'],
-                'PSD model used')
-    fhdr.set('seed', seed_val,
-                'Randomizer seed value')
-
-    # write the file
-    fits.writeto(wfe_folder + wfe_filename + '.fits', psd_opd.value, fhdr, overwrite=True)
-    
 
 def csvFresnel_vapptilt(rx_csv, samp, oversamp, break_plane, home_folder=None, 
                         psd_dict=None, seed=None, psd_reflection=True, print_rx=False, 

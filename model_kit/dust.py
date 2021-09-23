@@ -1,6 +1,7 @@
 # I think this only needs numpy
 
 import numpy as np
+from skimage import draw
 
 class dust_map:
     
