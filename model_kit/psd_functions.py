@@ -16,7 +16,6 @@ import os
 from matplotlib import gridspec
 import matplotlib.pyplot as plt
 
-
 # for calling in data
 from astropy.io import fits
 from astropy import units as u
@@ -207,15 +206,15 @@ class surfPSD:
         self.kmid_ll = kmid_ll
         self.khigh_ll = khigh_ll
         self.rms_tot = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[self.k_min, self.k_max],
-                                  print_rms=print_rms, print_kloc=print_kloc)
+                                  print_rms=print_rms)
         self.rms_l = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[self.k_min, kmid_ll],
-                                  print_rms=print_rms, print_kloc=print_kloc)
+                                  print_rms=print_rms)
         self.rms_m = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[kmid_ll, khigh_ll],
-                                  print_rms=print_rms, print_kloc=print_kloc)
+                                  print_rms=print_rms)
         self.rms_h = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[khigh_ll, self.k_max],
-                                  print_rms=print_rms, print_kloc=print_kloc)
+                                  print_rms=print_rms)
         self.rms_mh = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[kmid_ll, self.k_max],
-                                  print_rms=print_rms, print_kloc=print_kloc)
+                                  print_rms=print_rms)
     
     def write_psd_file(self, filename, psd_data, single_precision=True):
         # Write header and cards for FITS
@@ -243,6 +242,37 @@ class surfPSD:
 # PSD SPECIAL CASE: 2-D LOMB-SCARGLE
 def mvls_psd(data, mask, dx, k_side, print_update=False, 
              write_psd=False, psd_name=None, psd_folder=None):
+    '''
+    Parameters:
+        data - 2D numpy array with astropy units
+            Surface data in 2D array. Must have surface units (nm, um, etc)
+        mask - 2D numpy array
+            2D array of active surface components
+        dx - float with astropy units
+            spatial resolution of data, must have units (no need to match data units)
+        k_side - integer
+            Size of the 2D PSD. Optional.
+            Default is None (will be same size as the data)
+        print_update - Boolean
+            Printout for MVLS status update.
+            Default is False (do not print)
+        write_psd - Boolean
+            State whether to write the PSD to file.
+            Default is False (do not save PSD to file)
+        psd_name - String
+            If writing PSD to file, this is name of psd.
+            Default is None (no name to pass, assuming do not save file)
+        psd_folder - String
+            If writing PSD to file, this is the location of the psd.
+            Default is None (assuming do not save file)
+            
+    Output:
+        psd - 2D numpy array with astropy units
+            MVLS PSD, calibrated by the variance of the surface.
+        
+        lspsd_parms - list
+            List of various useful components, such as dk, kmin, kmax, var, radialFreq
+    '''
     
     # do some quick checking before running the whole code
     if write_psd == True:
@@ -257,6 +287,9 @@ def mvls_psd(data, mask, dx, k_side, print_update=False,
                 else:
                     raise Exception('PSD folder destination bad; please check again')
     
+    # calculate components
+    surf_var = np.var(data[mask==1]) # has units, should be data.unit**2
+    
     # create the vector array for spatial coordinates
     data_side = np.shape(data)[0]
     cen = int(data_side/2)
@@ -267,6 +300,14 @@ def mvls_psd(data, mask, dx, k_side, print_update=False,
     tnx = xx * dx.value # unitless
     tny = yy * dx.value # unitless
     
+    # spatial frequency components
+    # Note: k_side is not necessarily the same size as the data coming in.
+    if k_side == None: # if k_side not passed, match with the size of the data.
+        k_side = data.shape[0]
+    dk = 1/(data_side*dx.value) # unitless
+    kmin = dk/dx.unit # has units
+    kmax = int(k_side/2)*dk/dx.unit # has units
+    
     # load the data and apply a window to it
     surf_win = data.value * han2d((data_side, data_side)) # unitless
     
@@ -276,8 +317,6 @@ def mvls_psd(data, mask, dx, k_side, print_update=False,
     ytn = surf_win[mask_filter]
     
     # build the spatial frequency coordinates
-    # k_side is not necessarily the same size as the data coming in.
-    dk = 1/(data_side*dx.value) # unitless
     k_tot = k_side**2
     k_cen = int(k_side/2)
     if k_side % 2 == 0:
@@ -338,9 +377,16 @@ def mvls_psd(data, mask, dx, k_side, print_update=False,
                 , datetime.now().strftime("%H:%M:%S"))
         
     # outside the loop, all of tau, ak, bk should be filled in
-    # calculate the PSD
-    psd = ((ak**2) + (bk**2)) / (dk**2)
-    psd = np.reshape(psd, (k_side, k_side)) * (data.unit*dx.unit)**2
+    
+    # PSD assembly
+    # the mvls psd is the raw PSD that must be scaled by the variance.
+    psd_raw = ((ak**2) + (bk**2)) # unitless, but should be data.unit**2
+    # normalized PSD has no units, but this will be the shape of the PSD.
+    psd_norm = psd_raw / (np.sum(psd_raw) * (dk**2)) # unitless, but should be 1/dk.unit**2
+    # psd is the normalized psd calibrated by the surface variance.
+    psd = psd_norm * surf_var.value # unitless, but would be surf_var.unit (data.unit**2)
+    psd = np.reshape(psd, (k_side, k_side)) * (data.unit*dx.unit)**2 # reshape and correctly apply units
+    
     if print_update == True:
         print('Scargling and PSD completed, ending time =', datetime.now().strftime("%H:%M:%S"))
     
@@ -361,9 +407,12 @@ def mvls_psd(data, mask, dx, k_side, print_update=False,
         
         fits.writeto(psd_filename, psd.value, hdr, overwrite=True)
     
-    # apply all the units
+    # apply all the values
     lspsd_parms = {'dk': dk/dx.unit,
-                   'radialFreq': kx[0]/dx.unit}
+                   'radialFreq': kx[0]/dx.unit, # not sure if need to keep
+                   'kmin': kmin,
+                   'kmax': kmax,
+                   'var': surf_var}
     
     return psd, lspsd_parms
     
@@ -632,11 +681,13 @@ class model_combine:
         self.error = np.log10(self.psd_radial_sum_data.value/self.psd_radial_data.value)
         self.error_rms = np.sqrt(np.mean(np.square(self.error)))
         
-    def calc_psd_rms(self):
+    def calc_psd_rms(self, k_min=None):
         # note: changed npix_diam to side because this should work for oversampled optics too. (2020/12/15)
+        if k_min==None:
+            k_min = self.k_min
         self.psd_rms_sum = calc_model_rms(psd_parm=self.psd_parm, psd_weight=self.psd_weight, 
                                           side=self.side, delta_k=self.delta_k, 
-                                          k_tgt_lim=[self.k_min, self.k_max])
+                                          k_tgt_lim=[k_min, self.k_max])
 
 # Plotting assistance
 def plot_model2(mdl_set, model_sum, avg_psd, opt_parms, psd_range=[1e1, 1e-11]):
@@ -875,76 +926,256 @@ def load_psd_model_fits(fits_filename,
 ###########################################
 # BUILD SURFACE
 '''
-NOTE: This section is getting imported to POPPY eventually. Kept here for test coding.
+NOTE: This version slightly differs from poppy.wfe.PowerSpectrumWFE(), but only on how
+the wfe_rms scaling occurs. The version on POPPY uses built-in utilities for defining 
+coordinates and building the active aperture region used in scaling wfe_rms. The PSD shaping 
+and randomizer remain the same.
+
+The difference between this standalone code and the one in PowerSpectrumWFE is +/-0.01nm rms.
+However, the scaling at each pixel may not correctly correspond with pre-solved DM maps.
+The best thing to do is to use the 
+
+If you're looking to use the Fresnel paper's pre-solved DM maps, run the get_opd() function 
+in psd_wfe_poppy.py. It will require having POPPY installed.
 '''
-class surfgen:
-    def __init__(self, dx, npix_diam, oversamp):
-        self.dx = dx # phase space resolution [m/pix]
-        self.npix_diam = npix_diam # non-zero-padded diameter for POPPY
-        self.oversamp = oversamp # zero padded array size for FT
-        self.dk = 1/(oversamp * dx) # target fourier space resolution
-            
-    def calc_psd(self, psd_parm, psd_weight):
-        self.psd_parm=psd_parm
-        self.psd_weight=psd_weight
-        # build k-space map
-        cen = int(self.oversamp/2)
-        maskY, maskX = np.ogrid[-cen:cen, -cen:cen]
-        ky = maskY*self.dk
-        kx = maskX*self.dk
-        self.k_map = np.sqrt(kx**2 + ky**2)
+@u.quantity_input(wfe_rms=u.nm, wfe_radius=u.m, incident_angle=u.deg, pixscale=u.m)
+def make_wfe_map(psd_parameters=None, psd_weight=None, pixscale=None, seed=1234,
+                 samp=256, oversamp=4, wfe_rms=None, wfe_radius=None, 
+                 incident_angle=0*u.deg, apply_reflection=False, map_size='crop'):
+    """
+    Parameters
+    ----------
+    psd_parameters: list (for single PSD set) or list of lists (multiple PSDs)
+        List of specified PSD parameters.
+        If there are multiple PSDs, then each list element is a list of specified PSD parameters.
+        i.e. [ [PSD_list_0], [PSD_list_1]]
+        The PSD parameters in a list are ordered as follows:
+        [alpha, beta, outer_scale, inner_scale, surf_roughness]
+        where:            
+            alpha: float 
+                The PSD index value.
+            beta: astropy quantity
+                The normalization constant. In units of :math: `\frac{m^{2}}{m^{\alpha-2}}`
+                Numerator assumes surface units of meters
+                Denominator assumes spatial frequency units are 1/m
+            outer_scale: astropy quantity
+                The outer scale value, where the low spatial frequency flattens. 
+                Unit requirement: meters
+            inner_scale: float
+                Inner scale value, where the high spatial frequency flattens.
+            surf_roughness: astropy quantity
+                Surface roughness normalization. Should match units of PSD.
+    psd_weight: iterable list of floats
+        Specifies the weight muliplier to set onto each model PSD.
+        If none passed, then defaults to an array of 1's for equal weight placement.
+    pixscale: astropy quantity
+        Spatial pixel scale resolution of the optic.
+        Checks that must be in meters.
+    seed : integer
+        Seed for the random phase screen generator
+        If none passed, defaults to 1234 seed.
+    samp: integer
+        Sample size for the final wfe optic. Math is done in oversampled mode. 
+        If 'crop' chosen for map_size, then map_return is in samp size.
+        Default to 256.
+    oversamp: integer
+        Ratio quantity for scaling samp to calculate PSD screen size.
+        If 'full' chosen for map_size, then map_return is in oversamp*samp size.
+        Default to 4.
+    wfe_rms: astropy quantity
+        Optional. Use this to force the wfe RMS
+        If a value is passed in, this is the paraxial surface rms value (not OPD) in meters.
+        If None passed, then the wfe RMS produced is what shows up in PSD calculation.
+        Default to None.
+    wfe_radius: astropy quantity
+        Optional. If wfe_rms is passed, then the psd wfe is scaled to a beam of this radius.
+        If a value is not passed in, then assumes beam diameter fills entire sample plane and uses that.
+        Default to None.
+    incident_angle: astropy quantity
+        Adjusts the WFE based on reflected beam distortion.
+        Does not distort the beam (remains circular), but will get the rms equivalent value.
+        Can be passed as either degrees or radians.
+        Default is 0 degrees (paraxial).
+    apply_reflection: boolean
+        Applies 2x scale for the OPD as needed for reflection.
+        Default to False, which will only return surface.
+        Set to True if the PSD model only accounts for surface and want OPD.
+    map_size: string
+        Choose what type of PSD WFE screen is returned.
+        If 'crop', then will return the PSD WFE cropped to samp.
+        If 'full', then will return the PSD WFE at the full oversampled array.
+        Default to 'crop'.
         
-        # initialize the empty matrices
-        psd_map = np.zeros((self.oversamp, self.oversamp))
-        for nm in range(0, len(psd_weight)):
-            psd_map = psd_map + (psd_weight[nm] * model_full(k=self.k_map, psd_parm=psd_parm[nm]))
-        self.psd=psd_map # should clean up units
+    Returns
+    -------
+    map_return: numpy array with astropy quantity
+        WFE map array scaled according to wfe_rms units.
+    """
+    
+    
+    # Parameter checker
+    # check the incident angle units that it is not unreasonable
+    if incident_angle >= 90*u.deg:
+        raise ValueError("Incident angle must be less than 90 degrees, or equivalent in other units.")
         
-    def init_noise(self, mean=0,std=1):
-        self.noise_ph = np.random.normal(mean, std, (self.oversamp, self.oversamp))
-        self.noise_ft = np.fft.fftshift(np.fft.fft2(self.noise_ph))
+    if wfe_rms is None: # if want to take randomized rms value, pre-set the units
+        wfe_rms_unit = u.nm
+    else: # verify that if wfe_rms was passed, there is also a wfe_radius component.
+        wfe_rms_unit = wfe_rms.unit
+        if wfe_radius is None:
+            wfe_radius = pixscale * samp / 2 # assumes beam diameter fills entire sample plane
+    
+    # if psd_weight wasn't passed in but psd_parameters was, then default to equal weight.
+    if psd_weight is None:
+        psd_weight = np.ones((len(psd_parameters)))
         
-    def build_surf(self, noise_mean=0, noise_std=1, opd_reflect=True): # undergoing work, do not use this.
-        self.opd_reflect=opd_reflect
-        self.init_noise(mean=noise_mean, std=noise_std)
-        psd_sqrt=np.sqrt(self.psd/(self.dx**2))
-        cor_noise = np.fft.ifft2(np.fft.ifftshift(self.noise_ft * psd_sqrt))*psd_sqrt.unit
-        surface_full = np.real(cor_noise)
-        if opd_reflect==True:
-            surface_full = surface_full/2 # divide by 2 for reflection WFE
-        self.surface = dfx.doCenterCrop(optic_data=surface_full, shift=int(self.npix_diam/2))
-        self.rms = np.sqrt(np.sum(self.surface**2)/(self.npix_diam**2))
+    # verify the oversample isn't less than 1 (otherwise, ruins the scaling)
+    if oversamp < 1:
+        raise ValueError("Oversample must be no less than 1.")
+    
+    # verify that opd_crop is reasonable
+    if map_size != 'full' and map_size != 'crop':
+        raise ValueError("opd_crop needs to be either 'full' or 'crop', please try again.")
+    
+    # use pixelscale to calculate spatial frequency spacing
+    screen_size = samp * oversamp
+    dk = 1/(screen_size * pixscale) # 1/m units
+    k_map = build_kmap(side=screen_size, delta_k=dk.value)
+    
+    # calculate the PSD
+    psd_tot = np.zeros((screen_size, screen_size))
+    for n in range(0, len(psd_weight)):
+        # loop internal localized PSD variables
+        alpha = psd_parameters[n][0]
+        beta = psd_parameters[n][1]
+        outer_scale = psd_parameters[n][2]
+        inner_scale = psd_parameters[n][3]
+        surf_roughness = psd_parameters[n][4]
         
-    #def write_psd_file(self, filename, psd_data, single_precision=True):
-    def write_surf_file(self, file_folder, filename, single_precision=False):
-        # Write header and cards for FITS
-        hdr = fits.Header()
-        #hdr['name'] = (self.surf_name + ' PSD', 'filename')
-        hdr['opd_unit'] = (str(self.surface.unit), 'Units for surface OPD data')
-        hdr['opd_refl'] = (self.opd_reflect, 'Boolean if surface OPD/2 for reflection')
-        hdr['op_diam'] = (self.npix_diam*self.dx.value, 'Physical diameter for clear aperture [{0}]'.format(self.dx.unit))
-        hdr['scrnsz'] = (self.oversamp, 'Array size for screen generation')
-        hdr['pixscale'] = (self.dx.value, 'pixel scale [{0}/pix]'.format(self.dx.unit))
-        hdr['delta_k'] = (self.dk.value, 'Spatial frequency lateral resolution [{0}]'.format(self.dk.unit))
-        for n in range(0, len(self.psd_weight)):
-            hdr['alpha{0}'.format(n)] = (self.psd_parm[n][0], 'PSD alpha (exponent)')
-            hdr['beta{0}'.format(n)] = (self.psd_parm[n][1].value, 
-                                        'PSD beta (normalization) [{0}^2 {1}^(2-alpha)]'.format(self.surface.unit, self.dx.unit))
-            hdr['OS{0}'.format(n)] = (self.psd_parm[n][2].value, 
-                                      'PSD L0 (outer scale) [{0}]'.format(self.psd_parm[n][2].unit))
-            hdr['IS{0}'.format(n)] = (self.psd_parm[n][3], 'PSD l0 (inner scale)')
-            hdr['beta_sr{0}'.format(n)] = (self.psd_parm[n][4].value, 
-                                           'PSD surface roughness normalization [{0}^2 {1}^2]'.format(self.surface.unit, self.dx.unit))
-            hdr['weight{0}'.format(n)] = (self.psd_weight[n], 'Applied PSD weight value')
-        if single_precision==True:
-            write_data = np.single(self.surface.value)
+        # unit check
+        psd_units = beta.unit / ((dk.unit**2)**(alpha/2))
+        assert surf_roughness.unit == psd_units, "PSD parameter units are not consistent, please re-evaluate parameters."
+        surf_unit = (psd_units*(dk.unit**2))**(0.5)
+        
+        # initialize loop-internal PSD matrix
+        psd_local = np.zeros_like(psd_tot)
+        
+        # calculate the PSD equation based on outer_scale presence
+        if outer_scale.value == 0: # skip or else PSD explodes
+            # temporary overwrite of k_map at k=0 to stop div/0 problem
+            k_map[cen][cen] = 1/dk.value
+            # calculate PSD as usual
+            psd_denom = (k_map**2)**(alpha/2)
+            # calculate the immediate PSD value
+            psd_interm = (beta.value*np.exp(-((k_map*inner_scale)**2))/psd_denom)
+            # overwrite PSD at k=0 to be 0 instead of infinity
+            psd_interm[cen][cen] = 0
+            # return k_map back to original state
+            k_map[cen][cen] = 0
         else:
-            write_data = self.surface.value
+            psd_denom = ((outer_scale.value**(-2)) + (k_map**2))**(alpha/2) # unitless currently
+            psd_interm = (beta.value*np.exp(-((k_map*inner_scale)**2))/psd_denom)
+            
+        # apply the surface roughness
+        psd_local = psd_interm + surf_roughness.value
         
-        # Write to FITS file
-        fits.writeto(file_folder+filename, write_data, hdr, overwrite=True)
+        # apply the sum with the weight of the PSD model
+        psd_tot = psd_tot + (psd_weight[n] * psd_local) # should all be m2 [surf_unit]2, but unitless for all calc
         
+    # set the random noise
+    psd_random = np.random.RandomState()
+    psd_random.seed(seed)
+    rndm_noise = np.fft.fftshift(np.fft.fft2(psd_random.normal(size=(screen_size, screen_size))))
+    
+    psd_scaled = (np.sqrt(psd_tot/(pixscale.value**2)) * rndm_noise)
+    wfe_map = ((np.fft.ifft2(np.fft.ifftshift(psd_scaled)).real*surf_unit).to(wfe_rms_unit)).value
+    
+    # set the rms value based on the active region of the beam
+    if wfe_rms is not None:
+        # build the spatial map
+        r_map = build_kmap(side=screen_size, delta_k=pixscale.value)
+        circ = r_map < wfe_radius.value
+        active_ap = wfe_map[circ==True]
+        rms_measure = np.sqrt(np.mean(np.square(active_ap))) # measured rms from declared aperture
+        wfe_map *= (wfe_rms/rms_measure).value # appropriately scales entire opd
         
+    # apply angle adjustment for rms
+    if incident_angle.value != 0:
+        wfe_map /= np.cos(incident_angle).value
+        
+    # Set the reflection
+    if apply_reflection == True:
+        wfe_map *= 2
+    
+    if map_size == 'crop':
+        # resize the beam to the sample size from the screen size
+        if oversamp > 1:
+            samp_cen = int(samp/2)
+            cen = int(screen_size/2)
+            map_return = wfe_map[cen-samp_cen:cen+samp_cen, cen-samp_cen:cen+samp_cen]
+        else: # at 1, then return the whole thing
+            map_return = wfe_map
+    else:
+        map_return = wfe_map
+    
+    return map_return*wfe_rms_unit
+        
+# This function writes the PSD WFE files to drive for easy access in a .py script
+def write_psdwfe(wavefront, rx_opt_data, seed_val, psd_parameters, psd_weight, wfe_folder, wfe_filename,
+                 apply_reflection=False):
+    opt_name = rx_opt_data['Name']
+    psd_wfe_rms = rx_opt_data['Beam_rms_nm']*u.nm
+    opt_angle = rx_opt_data['Incident_Angle_deg']*u.deg
+    d_beam = rx_opt_data['Beam_Diameter_m']*u.m
+    
+    # function outputs to units of psd_wfe_rms, so need to rescale it to meters as required for POPPY
+    psd_opd = psd_wfe_poppy.get_opd(psd_parameters=psd_parameters,
+                                    psd_weight=psd_weight,
+                                    seed=seed_val,
+                                    incident_angle=opt_angle,
+                                    wfe_rms=psd_wfe_rms,
+                                    apply_reflection=apply_reflection,
+                                    map_size='full',
+                                    wave=wavefront).to(u.m)
+    
+    # initialize values for FITS header
+    br = 1/wavefront.oversample
+    npix = int(wavefront.n / wavefront.oversample)
+    wavelen = wavefront.wavelength
+    pixscale = wavefront._pixelscale_m
+    
+    # initialize the FITS header
+    fhdr = fits.Header()
+    fhdr.set('opt_name', opt_name, 
+                'Optical element name')
+    fhdr.set('opt_ind', rx_opt_data['Optical_Element_Number'], 
+                'Optical element number (j) from rx csv')
+    fhdr.set('npix', npix, 
+                'Sample size, pre-oversample')
+    fhdr.set('oversamp', br, 
+                'Oversample ratio')
+    fhdr.set('wavelen', wavelen.value, 
+                'Wavelength for Fresnel calc [{0}]'.format(str(wavelen.unit)))
+    fhdr.set('puplscal', pixscale.value, # old files may use pixscale, but puplscal required for poppy.
+                'Wavefront pixscale [{0}]'.format(str(pixscale.unit)))
+    fhdr.set('d_beam', d_beam.value,
+                'Beam diameter [{0}]'.format(str(d_beam.unit)))
+    fhdr.set('bunit', str(psd_opd.unit), # formerly opd_unit
+                'Units of opd wfe')
+    fhdr.set('wfe_rms', psd_wfe_rms.value,
+                'Surface rms at beam diam [{0}]'.format(str(psd_wfe_rms.unit)))
+    fhdr.set('i_angle', opt_angle.value,
+                'Incident angle [{0}]'.format(str(opt_angle.unit)))
+    fhdr.set('opd_refl', apply_reflection,
+                'Boolean: OPD reflection applied')
+    fhdr.set('psd_type', rx_opt_data['surf_PSD_filename'],
+                'PSD model used')
+    fhdr.set('seed', seed_val,
+                'Randomizer seed value')
+
+    # write the file
+    fits.writeto(wfe_folder + wfe_filename + '.fits', psd_opd.value, fhdr, overwrite=True)
+    
 ###########################################
 # INTERPOLATION
 
@@ -1110,7 +1341,7 @@ def build_kmap(side, delta_k):
     kx = kx*delta_k
     kmap = np.sqrt(kx**2 + ky**2)
     return kmap
-
+    
 def calc_model_rms(psd_parm, psd_weight, side, delta_k, k_tgt_lim):
     k_map = build_kmap(side = side, delta_k = delta_k)
     
@@ -1123,11 +1354,40 @@ def calc_model_rms(psd_parm, psd_weight, side, delta_k, k_tgt_lim):
     
     # with the PSD calculated, do the RMS
     psd_rms_sum = do_psd_rms(psd_data=psd_2D, delta_k=delta_k, 
-                             k_tgt_lim=k_tgt_lim, print_rms=False, print_kloc=False)
+                             k_tgt_lim=k_tgt_lim, print_rms=False)
     return psd_rms_sum
 
+def do_psd_rms(psd_data, delta_k, k_tgt_lim, print_rms=False):   
+    # create the grid
+    side = np.shape(psd_data)[0]
+    cen = int(side/2)
+    if side%2 == 0:
+        my, mx = np.mgrid[-cen:cen, -cen:cen]
+    else:
+        my, mx = np.mgrid[-cen:cen+1, -cen:cen+1]
+    ky = my*delta_k
+    kx = mx*delta_k
+    kmin = k_tgt_lim[0]
+    kmax = k_tgt_lim[1]
+    
+    # make the mask
+    ring_mask_out = kx**2 + ky**2 <= kmax**2
+    if kmin.value != 0:
+        ring_mask_in = kx**2 + ky**2 <= kmin**2
+        ring_mask = ring_mask_out ^ ring_mask_in #XOR statement
+    else:
+        ring_mask = ring_mask_out
+    ring_bin = np.extract(ring_mask, psd_data) #* psd_data.unit
+    
+    # calculate the rms
+    rms_val = np.sqrt(np.sum(ring_bin * (delta_k**2))) # should have units
+    if print_rms==True:
+        print('Target range - k_min: {0:.3f} and k_high: {1:.3f}'.format(kmin, kmax))
+        print('RMS value: {0:.4f}'.format(rms_val))
+    return rms_val
 
-def do_psd_rms(psd_data, delta_k, k_tgt_lim, print_rms=False, print_kloc=False):   
+
+def do_psd_rms_old(psd_data, delta_k, k_tgt_lim, print_rms=False, print_kloc=False):   
     # create the grid
     side = np.shape(psd_data)[0]
     cen = int(side/2)
