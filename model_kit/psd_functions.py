@@ -31,20 +31,46 @@ from . import psd_wfe_poppy
 # surfPSD Class definition
 
 class surfPSD:
+    '''
+    Class for creating the PSD for a surface measurement.
+    Used in MagAO-X, CDEEP, and CACTI.
+    '''
     
     def __init__(self, surf_name, **kwargs):
         self.surf_name = surf_name
         
     def open_surf(self, fileloc, surf_units):
-        # to use if opening the data from a FITS file
-        # assumes the data is efficiently filled (no zero col/row)
+        '''
+        Use this function if opening data from a FITS file
+        Assumes data is efficienty filled (no extra row/col with only zeros)
+        Parameters:
+            fileloc: string
+                Filename of the surface file to be opened.
+                Must include the '.fits' portion in the file.
+            surf_units: astropy units
+                Surface height units provided by the Zygo or whatever you want.
+                Preferred: nanometers or microns (Zygo)
+        '''
         self.data = (fits.open(fileloc)[0].data*surf_units) # units from Zgyo analysis
         hdr = fits.open(fileloc)[0].header
         self.wavelen = hdr['WAVELEN'] * u.m
         self.latres = hdr['LATRES'] * u.m / u.pix
     
     def load_surf(self, data, wavelen, latres):
-        # to use if data has already been loaded into environment
+        '''
+        Use this function if the data is already loaded into an environment
+        Parameters:
+            data: numpy array with astropy units
+                Surface data with units of height.
+                Data must be efficiently filled (no extra row/col with only zeros)
+            wavelen: float with astropy units
+                Wavelength of beam used for measurement
+                Units: meters
+            latres: float with astropy units
+                Spatial lateral resolution of data
+                Assumes 1:1 aspect ratio for vertical and horizontal
+                Units: meters
+        '''
         if hasattr(data, 'unit'): # set to data if there are units
             self.data = data
         else: # exit if there are no units
@@ -59,10 +85,25 @@ class surfPSD:
             raise Exception('Lateral Resolution needs units')
         
     def open_mask(self, fileloc):
+        '''
+        Opens the surface mask from a file.
+        Assumes data is efficienty filled (no extra row/col with only zeros)
+        Parameters:
+            fileloc: string
+                Filename of the mask file to be opened.
+                Must include the '.fits' portion in the file.
+        '''
         mask = fits.open(fileloc)[0].data
         self.load_mask(mask)
     
     def load_mask(self, mask):
+        '''
+        Loads the surface mask from the environment.
+        Assumes data is efficienty filled (no extra row/col with only zeros)
+        Parameters:
+            mask: numpy array
+                binary mask file of active region of surface.
+        '''
         if mask.shape != self.data.shape:
             raise Exception('Mask and data are not compatiable (shape)')
         else:
@@ -71,6 +112,21 @@ class surfPSD:
             self.diam_ca = (self.npix_diam * u.pix * self.latres)#.to(u.mm)
             
     def open_psd(self, psd_fileloc, psd_type, var_unit = u.nm):
+        '''
+        Opens the 2D PSD from a file.
+        Parameters:
+            psd_fileloc: string
+                Filename of the mask file to be opened.
+                Must include the '.fits' portion in the file.
+            psd_type: string
+                PSD type passed in.
+                Has 2 options:
+                    norm: normalized PSD
+                    cal: variance-calibrated PSD
+            var_unit: astropy units
+                variance unit. Will be squared for actual variance.
+                Default: nanometers
+        '''
         psd_fits = fits.open(psd_fileloc)[0]
         hdr = psd_fits.header
         self.oversamp = hdr['oversamp']
@@ -87,6 +143,22 @@ class surfPSD:
             self.psd_cal = psd_fits.data * (self.diam_ca.unit**2) * (var_unit**2)
             
     def load_psd(self, psd_data, psd_type, var=None):
+        '''
+        Loads the 2D PSD locally from the environment.
+        Parameters:
+            psd_data: numpy
+                2D PSD data, should have units
+                Recommended: nm2 m2
+            psd_type: string
+                PSD type passed in.
+                Has 3 options:
+                    norm: normalized PSD
+                    cal: variance-calibrated PSD
+                    raw: uncalibrated PSD
+            var_unit: astropy units
+                variance unit. Will be squared for actual variance.
+                Default: optional
+        '''
         if hasattr(psd_data, 'unit'):
             if psd_type=='norm':
                 self.psd_norm=psd_data
@@ -101,6 +173,27 @@ class surfPSD:
             raise Exception('PSD needs units')
         
     def load_psd_parameters(self, diam_ca, npix_diam, wavelen,delta_k=None, oversamp=None):
+        '''
+        Loads the PSD parameters.
+        Use this if using load_psd.
+        Parameters:
+            diam_ca: float with astropy units
+                diameter of clear aperture surface.
+                Units recommend: meters 
+            npix_diam: integer
+                number of pixels across the clear aperture diameter
+            wavelen: float with astropy units
+                Wavelength of beam used for measurement
+                Units: meters
+            delta_k: float with astropy units
+                spatial frequency spacing.
+                Optional, because can be back solved.
+                Units: 1/m
+            oversamp: integer
+                Size of array from oversampling.
+                Option, because can be back solved.
+                Usually: 4096
+        '''
         self.diam_ca = diam_ca
         self.npix_diam = npix_diam
         self.wavelen = wavelen
@@ -111,6 +204,14 @@ class surfPSD:
         self.calc_psd_parameters(delta_k=delta_k) # calculate other necessary parameters
     
     def calc_psd_parameters(self, delta_k=None):
+        '''
+        Calculates the PSD parameters.
+        Parameters:
+            delta_k: float with astropy units
+                spatial frequency spacing.
+                Optional, because can be back solved.
+                Units: 1/m
+        '''
         self.k_min = 1/self.diam_ca
         self.k_max = 1/(2*self.diam_ca / self.npix_diam)
         if delta_k is not None:
@@ -119,6 +220,27 @@ class surfPSD:
             self.delta_k = 1/(self.oversamp*self.diam_ca/self.npix_diam)
         
     def calc_psd(self, oversamp, kmid_ll = 0.1/u.mm, khigh_ll=1/u.mm, var_unit = u.nm):
+        '''
+        Calculates the 2D PSD. This is one of the workhorse functions.
+        Parameters:
+            oversamp: integer
+                Size of array from oversampling.
+                Option, because can be back solved.
+                Usually: 4096
+            kmid_ll: float with astropy unit
+                Lower limit of the mid-range spatial frequency region.
+                Technically optional unless looking for RMS at mid-spatial frequency.
+                Can be left alone, but if code breaks just adjust to a lower number.
+                Default: 0.1/u.mm
+            khigh_ll: float with astropy unit
+                Lower limit of the high-range spatial frequency region.
+                Technically optional unless looking for RMS at high-spatial frequency.
+                Can be left alone, but if code breaks just adjust to a lower number.
+                Default: 1/u.mm
+            var unit: astropy units
+                Unit setting for surface height variance scaling.
+                Defaults as nanometer, but can be anything.
+        '''
         self.oversamp = oversamp
         if var_unit != self.data.unit: # data units must match variance units.
             self.data = self.data.to(var_unit)
@@ -176,6 +298,14 @@ class surfPSD:
         # rms should be in units of [data]
         
     def check_normpsd(self, psd_norm):
+        '''
+        Verifies that the 2D PSD is normalized.
+        Was made to be independent of setting it as a self.psd_norm
+        Parameters:
+            psd_norm: numpy array with units
+                Normalized 2D PSD data
+                units: [self.surf.units]**2
+        '''
         var_verify = np.sum(psd_norm) * (self.delta_k**2) # unitless and 1
         psd_verify = np.allclose(1, var_verify)
         if psd_verify==True:
@@ -184,6 +314,17 @@ class surfPSD:
             print('PSD not normalized: var={0:.3f}. What happened?'.format(var_verify))
     
     def mask_psd(self, center, radius):
+        '''
+        Masks out regions in the 2D PSD.
+        This was necessary for OAP-2 for MagAO-X.
+        Parameters:
+            center: numpy array
+                Center pixel coordinates of regions to mask out.
+                Each row has 2 values (row, column)
+                Each row is a different center coordinate location
+            radius: integer
+                Radius value of masked region
+        '''
         mask = np.ones((self.oversamp, self.oversamp))
         
         # fill in the mask
@@ -198,12 +339,41 @@ class surfPSD:
         self.psd_cal *= mask
     
     def calc_psd_radial(self, ring_width, kmin=None):
+        '''
+        Calculates the radial PSD distribution via rms of annular regions.
+        Parameters:
+            ring_width: integer
+                Width of ring for annulus calculation.
+                Must be an odd number greater than 1.
+            kmin: float (with units? I am not sure)
+                Starting spatial frequency value for radial PSD calculation.
+                Defaults to None, which starts at first opportunity in function.
+        '''
         # shortcut version for basic code analysis
         (self.k_radial, self.psd_radial_cal) = do_psd_radial(psd_data=self.psd_cal, delta_k=self.delta_k, ring_width=ring_width, kmin=kmin)
     
     def calc_rms_set(self, kmid_ll, khigh_ll, pwr_opt, print_rms=False, print_kloc=False):
-        # Calculate the RMS based on the k-parameter limits
-        # all RMS units are same units as data and variance.
+        '''
+        Calculate the RMS of regions based on the k-parameter limits
+        All RMS units are same units as data and variance.
+        Parameters:
+            kmid_ll: float with astropy unit
+                Lower limit of the mid-range spatial frequency region.
+                Technically optional unless looking for RMS at mid-spatial frequency.
+                Can be left alone, but if code breaks just adjust to a lower number.
+                Default: 0.1/u.mm
+            khigh_ll: float with astropy unit
+                Lower limit of the high-range spatial frequency region.
+                Technically optional unless looking for RMS at high-spatial frequency.
+                Can be left alone, but if code breaks just adjust to a lower number.
+                Default: 1/u.mm
+            pwr_opt: numpy array with astropy units
+                2D PSD array with units for calculating RMS values.
+                Good options: self.psd_cal
+            print_rms: Boolean
+                Determine whether to print out the rms values
+                Default to False (do not print out the values)
+        '''
         self.kmid_ll = kmid_ll
         self.khigh_ll = khigh_ll
         self.rms_tot = do_psd_rms(psd_data=pwr_opt, delta_k=self.delta_k, k_tgt_lim=[self.k_min, self.k_max],
@@ -218,6 +388,21 @@ class surfPSD:
                                   print_rms=print_rms)
     
     def write_psd_file(self, filename, psd_data, single_precision=True):
+        '''
+        Write the PSD data to file.
+        I think this only applies to 2D PSDs and not the radial results.
+        
+        Parameters:
+            filename: string
+                Location and name of file to save PSD data to
+            psd_data: numpy array with astropy units
+                PSD data to save to file
+                Good options: self.psd_cal, self.psd_norm
+            single_precision: Boolean
+                State whether to save data at single precision to save space,
+                Otherwise will save in default state (double precision)
+                Defaults to True (save to single precision)
+        '''
         # Write header and cards for FITS
         hdr = fits.Header()
         hdr['name'] = (self.surf_name + ' PSD', 'filename')
@@ -440,6 +625,24 @@ class model_single(surfPSD):
         self.region_num = region_num
     
     def set_data(self, ind_range, k_radial, p_radial, k_min, k_max):
+        '''
+        Use to initialize the data without a surfPSD class object.
+        Parameters:
+            ind_range: numpy array, integers
+                Starting and end index points through the spatial and psd arrays
+            k_radial: numpy array with astropy units
+                Spatial frequency array
+                Units: 1/m preferably
+            psd_radial: numpy array with astropy units
+                Radial PSD array
+                Units: nm2 m2 preferably
+            k_min: float with astropy units
+                minimum spatial freqeuncy value for surface measurement
+                units: 1/m preferably
+            kmax: float with astropy units
+                maximum spatial frequency value for surface measurement
+                units: 1/m preferably
+        '''
         if hasattr(k_radial, 'unit') and hasattr(p_radial, 'unit'):
             self.k_radial = k_radial
             self.p_radial = p_radial
@@ -465,6 +668,15 @@ class model_single(surfPSD):
             raise Exception('k_max needs units and preferably should match with k_radial')
     
     def load_data(self, ind_range, psd_obj=None):
+        '''
+        Use this to load up the radial PSD and spatial frequency with surfPSD object.
+        Parameters:
+            ind_range: numpy array, integers
+                Starting and end index points through the spatial and psd arrays
+            psd_obj: surfPSD object
+                use all the components in the surfPSD object to load up information
+                Default to None (I'm not sure the benefit of this)
+        '''
         self.i_start = ind_range[0]
         self.i_end = ind_range[1]
         if psd_obj is not None: # passed in a separate object
@@ -479,6 +691,13 @@ class model_single(surfPSD):
         self.surf_unit = (self.p_data.unit*(self.k_data.unit**2))**(0.5) # sqrt alternative
         
     def load_psd_parm(self, psd_parm_list):
+        '''
+        Load in PSD parameters if predetermined outside of function
+        Parameters:
+            psd_parm_list: list with 5 values, separate units
+                Each value in list is a different PSD parameter value
+                See note above for comments on the parameters
+        '''
         self.alpha = psd_parm_list[0]
         self.beta = psd_parm_list[1]
         self.L0 = psd_parm_list[2]
@@ -486,6 +705,16 @@ class model_single(surfPSD):
         self.bsr = psd_parm_list[4]
         
     def calc_psd_parm(self, rms_sr, x0=[1.0, 1.0, 1.0, 1.0]):
+        '''
+        Calculate the PSD parameters through a least squares fitting function
+        Parameters:
+            rms_sr: float with astropy units
+                Surface roughness rms value
+                Units: nanometer, or at least has to match surface units.
+            x0: list of floats
+                "Guessing" values for non-linear least square fitting
+                Could be anything, but 1.0 usually works.
+        '''
         # calculate the surface roughness value
         if hasattr(rms_sr, 'unit'): # unit check and fix
             if rms_sr.unit != self.surf_unit:  
@@ -506,6 +735,25 @@ class model_single(surfPSD):
         self.lo = res_lsq.x[3]
         
     def calc_model_total(self, psd_weight=1.0, k_range=None, k_spacing=None, k_limit=None):
+        '''
+        Calculates the PSD for full spatial frequency range (as opposed to regional)
+        Parameters:
+            psd_weight: float
+                Weight of PSD model.
+                Defaults to 1.0, but can be changed.
+            k_range: numpy array with astropy units
+                Spatial frequency range for PSD calculation
+                Units: 1/m preferably
+                Defaults to None to allow calculation based on k_spacing and k_limit
+            k_spacing: float with astropy units
+                Linear spacing for spatial frequency range
+                Units: 1/m preferably
+                Defaults to None in case k_range is passed
+            k_limit: numpy array with astropy units
+                Lower [0] and upper [1] bound limits for spatial frequency range
+                Units: 1/m preferably
+                Defaults to None in case k_range is passed
+        '''
         # set the k-range
         if k_range is None: # k_range passed in as None defaults to setting k_range
             if k_spacing is None:
@@ -527,6 +775,15 @@ class model_single(surfPSD):
             self.psd_full_scaled = self.psd_full * psd_weight
     
     def calc_beta(self, alpha, rms_surf):
+        '''
+        Calculates the beta parameter based on alpha and rms_surf
+        Parameters:
+            alpha: float
+                Power index value for PSD
+            rms_surf: float with units
+                Surface roughness rms value
+                Units: nanometer (or match with surface height units)
+        '''
         # unit check and fix
         if hasattr(rms_surf, 'unit'):
             if rms_surf.unit != self.surf_unit:   
@@ -539,8 +796,16 @@ class model_single(surfPSD):
 
 # Supporting functions inside the model class
 def psd_fitter(x, k):
-    # x: parameters to fit
-    # k: spatial frequency values
+    '''
+    Apply the PSD model parameters to spatial frequency values
+    Works for multiple PSD sets
+    I'm not sure how this works, months after writing it...
+    Parameters:
+        x: numpy array with units(?)
+            PSD parameters for fitting
+        k: numpy array with units
+            Spatial frequency values
+    '''
     n_prm = 4 # THERE ARE FOUR LIGHTS -Captain Jean-Luc Picard
     n_psd = int(len(x)/n_prm)
     for j in range(0, n_psd):
@@ -553,14 +818,54 @@ def psd_fitter(x, k):
     return pk
 
 def fit_func(x, k, y):
-    # y: values to fit against
+    '''
+    Fitting the modeled PSD to the PSD data
+    Parameters:
+        x: numpy array with units(?)
+            PSD parameters for fitting
+        k: numpy array with units
+            Spatial frequency values
+        y: numpy array with units (?)
+            Radial PSD values from measured PSD
+            "values to fit against" 
+    '''
     pk = psd_fitter(x,k)
     return pk-y
 
 def fit_func_ratio(x, k, y):
+    '''
+    Same as fit_func, but forcing a scaled value for the fitting
+    Parameters:
+        x: numpy array with units(?)
+            PSD parameters for fitting
+        k: numpy array with units
+            Spatial frequency values
+        y: numpy array with units (?)
+            Radial PSD values from measured PSD
+            "values to fit against" 
+    '''
     return fit_func(x,k,y)/y
 
 def model_beta(k_min, k_max, alpha, rms_surf):
+    '''
+    Models the beta value based on values
+    Parameters:
+        k_min: float with astropy units
+            Lower limit spatial frequency value
+            Units: 1/m preferably
+        k_max: float with astropy units
+            Upper limit spatial frequency value
+            Units: 1/m preferably
+        alpha: float
+            PSD power index value
+        rms_surf: float with astropy units
+            Surface roughness rms
+            Units: nanometer (or match with surface unit)
+    Return:
+        beta: float with astropy units
+            Normalized scaling parameter value
+            Has messy units
+    '''
     if alpha==2:
         beta = (rms_surf**2) / (2*np.pi*np.log(k_max/k_min))
     else: # when alpha not 2
@@ -568,10 +873,38 @@ def model_beta(k_min, k_max, alpha, rms_surf):
     return beta # units safe
 
 def model_bsr(k_min, k_max, rms_sr):
+    '''
+    Calculates the normalized surface roughness value based on parameters
+    Parameters:
+        k_min: float with astropy units
+            Lower limit spatial frequency value
+            Units: 1/m preferably
+        k_max: float with astropy units
+            Upper limit spatial frequency value
+            Units: 1/m preferably
+        rms_sr: float with astropy units
+            Surface roughness rms
+            Units: nanometer (or match with surface unit)
+    Returns:
+        bsr: float with astropy units
+            Normalized surface roughness
+            Matches PSD units
+    '''
     return (rms_sr**2) / (np.pi * (k_max**2 - k_min**2)) # units safe
 
 def model_full(k, psd_parm):
-    # calculates a single power instance based on passed parameters
+    '''
+    Calculates a single PSD instance based on passed parameters
+    Parameters:
+        k: numpy array with astropy units
+            Spatial frequency range
+            Units: 1/m preferably
+        psd_parm: list with astropy units
+            List value of each PSD parameter value
+            See overhead note for details
+            Each PSD parameter has its own units
+    '''
+    # 
     alpha=psd_parm[0]
     beta=psd_parm[1]
     L0=psd_parm[2]
@@ -604,8 +937,20 @@ def model_full(k, psd_parm):
 # MODEL APPLICATION
 
 class model_combine:
+    '''
+    We had single region PSD modeling, 
+    now it's time to combine all the regions together.
+    '''
     def __init__(self, mdl_set, avg_psd):
-        # collect data from the average PSD object
+        '''
+        Set up all the data parameters from the PSD model objects
+        Parameters:
+            mdl_set: list of model_single objects
+                List of regional modeled PSD objects
+            avg_psd: Not sure what sort of object
+                Averaged PSD of surface measurements
+        '''
+        # Collect data from the average PSD object
         self.delta_k = avg_psd.delta_k
         self.npix_diam = avg_psd.npix_diam
         self.side = np.shape(avg_psd.psd_cal)[0]
@@ -633,6 +978,10 @@ class model_combine:
         self.surf_unit = mdl_set[0].surf_unit
         
     def calc_refit(self):
+        '''
+        Apply a general fitting for the combined PSD models to
+        the measured surface PSD data
+        '''
         x0 = []
         n_psd = len(self.psd_parm)
         for j in range(0, n_psd):
@@ -662,6 +1011,14 @@ class model_combine:
         self.psd_radial_sum_data = mdl_sum_data * new_mdl.unit 
         
     def overwrite_parm(self, section_num, overwrite_parm):
+        '''
+        Overwrites the PSD parameters for each section after doing the refit
+        Parameters:
+            section_num: integer
+                Regional section number of PSD model
+            overwrite_parm: list with individual element astropy units
+                List of PSD parameters to replace the original section parameters
+        '''
         n_psd = len(self.psd_parm)
         new_parm = copy.copy(self.psd_parm)
         new_parm[section_num] = overwrite_parm
@@ -679,19 +1036,40 @@ class model_combine:
         
         
     def calc_error(self):
+        '''
+        Calculates the error between the combined model PSD and measured PSD
+        '''
         self.error = np.log10(self.psd_radial_sum_data.value/self.psd_radial_data.value)
         self.error_rms = np.sqrt(np.mean(np.square(self.error)))
         
     def calc_psd_rms(self, k_min=None):
+        '''
+        Calculates the rms of the new model PSD
         # note: changed npix_diam to side because this should work for oversampled optics too. (2020/12/15)
+        '''
         if k_min==None:
             k_min = self.k_min
         self.psd_rms_sum = calc_model_rms(psd_parm=self.psd_parm, psd_weight=self.psd_weight, 
                                           side=self.side, delta_k=self.delta_k, 
                                           k_tgt_lim=[k_min, self.k_max])
 
-# Plotting assistance
-def plot_model2(mdl_set, model_sum, avg_psd, opt_parms, psd_range=[1e1, 1e-11]):
+# 
+def plot_model2(mdl_set, model_sum, avg_psd, opt_parms, psd_range=[1e1, 1e-11],
+                apply_title=False):
+    '''
+    Plotting assistance to show PSD model with measured data
+    Parameters:
+        mdl_set: list of model_single objects
+            list of individual regional modeled PSD objects
+        model_sum: model_combine object
+            Combined model PSD
+        avg_psd: surfPSD object (maybe?)
+            Averaged PSD from surface measurements
+        opt_parms: dictionary
+            Optical parameters for surface set
+        psd_range: numpy array
+            Power value range to show on plot (vertical axis)
+    '''
     k_radial = avg_psd.k_radial.value
     psd_radial = avg_psd.psd_radial_cal.value
     k_range_mdl = mdl_set[0].k_range.value
@@ -723,7 +1101,8 @@ def plot_model2(mdl_set, model_sum, avg_psd, opt_parms, psd_range=[1e1, 1e-11]):
     ax0.set_ylim(top = psd_range[0], bottom=psd_range[1])
     ax0.set_ylabel('PSD ({0})'.format(mdl_set[0].psd_full.unit))
     ax0.legend(prop={'size':8})#,loc='center left', bbox_to_anchor=(1, 0.5))
-    ax0.set_title('MagAO-X PSD modeling (PRELIMINARY VISUAL): {0}, {1}% CA'.format(opt_parms['label'], opt_parms['ca']))
+    if apply_title == True:
+        ax0.set_title('MagAO-X PSD modeling (PRELIMINARY VISUAL): {0}, {1}% CA'.format(opt_parms['label'], opt_parms['ca']))
     
     err_rms = np.sqrt(np.mean(np.square(model_sum.error)))
     ax1 = plt.subplot(gs[1])
@@ -744,9 +1123,17 @@ def plot_model2(mdl_set, model_sum, avg_psd, opt_parms, psd_range=[1e1, 1e-11]):
 Set of functions for writing some data into FITS tables
 '''
 
-# Saving the radial PSD data into a FITS table format
 def psd_radial_to_fits(psd_dict, opt_name, fits_filename):
-    
+    '''
+    Saves the radial PSD data into a FITS Table format.
+    Parameters:
+        psd_dict: dictonary
+            dictionary content of different PSD things
+        opt_name: string
+            Name of optic
+        fits_filename: string
+            filename to save FITS file to
+    '''
     # Assemble the table HDU for the radial PSD data
     c0 = fits.Column(name='k_radial', array=psd_dict['k_radial'].value, format='D')
     c1 = fits.Column(name='psd_radial', array=psd_dict['psd_radial'].value, format='D')
@@ -792,6 +1179,23 @@ def psd_radial_to_fits(psd_dict, opt_name, fits_filename):
 # Saving the combined PSD dictionary to FITS table format
 def psd_model_to_fits(psd_dict, opt_name, fits_filename,
                  surf_unit=u.nm, lat_unit=u.m):
+    '''
+    Saves the modeled PSD data into a FITS Table format.
+    Parameters:
+        psd_dict: dictonary
+            dictionary content of different PSD things
+        opt_name: string
+            Name of optic
+        fits_filename: string
+            filename to save FITS file to
+        surf_unit: astropy quantity
+            Units of surface height
+            Default to nanometers
+        lat_unit: astropy quantity
+            Units of spatial measurement resolution
+            Default to meters
+    '''
+    
     # get the names of the dictionary entries
     rms_name = 'psd_{0}_rms'.format(opt_name)
     weight_name = 'psd_{0}_weight'.format(opt_name)
@@ -887,6 +1291,19 @@ def psd_model_to_fits(psd_dict, opt_name, fits_filename,
 # Loading the combined PSD parameters from FITS file format
 def load_psd_model_fits(fits_filename, 
                        surf_unit=u.nm, lat_unit=u.m):
+    '''
+    Loads the PSD model data from a FITS Table format.
+    Parameters:
+        fits_filename: string
+            filename to open FITS file
+        surf_unit: astropy quantity
+            Units of surface height
+            Default to nanometers
+        lat_unit: astropy quantity
+            Units of spatial measurement resolution
+            Default to meters
+    '''
+    
     # unload the fits file
     hdul = fits.open(fits_filename)
     
@@ -1121,9 +1538,37 @@ def make_wfe_map(psd_parameters=None, psd_weight=None, pixscale=None, seed=1234,
     
     return map_return*wfe_rms_unit
         
-# This function writes the PSD WFE files to drive for easy access in a .py script
+# 
 def write_psdwfe(wavefront, rx_opt_data, seed_val, psd_parameters, psd_weight, wfe_folder, wfe_filename,
                  apply_reflection=False):
+    '''
+    This function writes the PSD WFE files to drive for easy access in a .py script
+    Parameters:
+        wavefront: poppy wavefront object
+            wavefront object created from poppy
+        rx_opt_data: dictionary? list?
+            Prescription information about the optical surface
+        seed_val: integer
+            Seed value to lock in randomizer
+        psd_parameters: list (for single PSD set) or list of lists (multiple PSDs)
+            List of specified PSD parameters.
+            If there are multiple PSDs, then each list element is a list of specified PSD parameters.
+            i.e. [ [PSD_list_0], [PSD_list_1]]
+            The PSD parameters in a list are ordered as follows:
+            [alpha, beta, outer_scale, inner_scale, surf_roughness]
+        psd_weight: list of floats
+            Weight value of each PSD model piece to apply to full PSD
+            Recommended: all 1's
+        wfe_folder: string
+            Location to save the WFE files
+        wfe_filename: sting
+            Base filename of WFE files
+        apply_reflection: Boolean
+            Applies 2x scale for the OPD as needed for reflection.
+            Default to False, which will only return surface.
+            Set to True if the PSD model only accounts for surface and want OPD.
+            
+    '''
     opt_name = rx_opt_data['Name']
     psd_wfe_rms = rx_opt_data['Beam_rms_nm']*u.nm
     opt_angle = rx_opt_data['Incident_Angle_deg']*u.deg
@@ -1181,6 +1626,17 @@ def write_psdwfe(wavefront, rx_opt_data, seed_val, psd_parameters, psd_weight, w
 # INTERPOLATION
 
 def k_interp(oap_label, kval, npix_diam, norm_1Dpsd, cal_1Dpsd, k_npts):
+    '''
+    Interpolates the PSD data to a different spatial frequency set
+    Parameters:
+        oap_label: string
+            Name of OAP (or optic)
+        kval: Not sure what this is
+            Not sure what it is for
+        npix_diam: integer
+            Number of pixels in diameter
+        norm_1Dpsd: numpy array 
+    '''
     kmin = []
     kmax = []
     ntot = np.shape(npix_diam)[0]
@@ -1275,6 +1731,7 @@ def get_radial_dist(shape, scaleyx=(1.0, 1.0)):
     return radial
 
 def set_k_range(k_spacing, k_limit):
+    
     # custom setting spatial frequency range
     k_extend = np.arange(start=k_limit[0].value, stop=k_limit[1].value, step=k_spacing.value)
     return k_extend * k_spacing.unit

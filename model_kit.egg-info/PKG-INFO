@@ -1,0 +1,11 @@
+Metadata-Version: 1.2
+Name: model-kit
+Version: 0.0.1.dev0
+Summary: Testbed modeling tools
+Home-page: https://github.com/jlumbres/model_kit
+Author: Jennifer Lumbres
+Author-email: jlumbres@email.arizona.edu
+License: UNKNOWN
+Description: UNKNOWN
+Platform: UNKNOWN
+Requires-Python: >=3.6

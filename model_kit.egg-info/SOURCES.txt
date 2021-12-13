@@ -1,0 +1,12 @@
+README.md
+setup.py
+model_kit/__init__.py
+model_kit/datafiles.py
+model_kit/dust.py
+model_kit/magaoxFunctions.py
+model_kit/psd_functions.py
+model_kit/zernike.py
+model_kit.egg-info/PKG-INFO
+model_kit.egg-info/SOURCES.txt
+model_kit.egg-info/dependency_links.txt
+model_kit.egg-info/top_level.txt
